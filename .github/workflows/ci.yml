@@ -1,0 +1,163 @@
+name: CI
+
+# What runs automatically: everything that needs no infrastructure.
+# The slot-dependent suites (service/routing/gateway/ops) need a seeded egress
+# pool, so they run in the manual "integration" job with a subscription secret.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast, hermetic checks. This is the gate that must stay green.
+  # ---------------------------------------------------------------------------
+  static:
+    name: Typecheck, unit suites, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit suites
+        run: |
+          npm run test:anthropic
+          npm run test:retention
+          npm run test:tpm
+          npm run test:mapreduce
+          npm run test:side-effects
+
+      - name: Core acceptance scenarios (A-G)
+        run: npm test
+
+      - name: Build (frontend + compiled backend)
+        run: npm run build
+
+      - name: Upload build output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: |
+            dist/
+            src/frontend/dist/
+          retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # Real-provider contract test. Manual only, because it costs money and needs
+  # secrets. Set these repository secrets first:
+  #   PROVIDER_TEST_BASE_URL, PROVIDER_TEST_API_KEY, PROVIDER_TEST_MODEL
+  # ---------------------------------------------------------------------------
+  provider-contract:
+    name: Real-provider contract (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Fetch Xray-core (a real egress slot is required)
+        run: |
+          mkdir -p bin
+          curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip" -o /tmp/xray.zip
+          unzip -q -o /tmp/xray.zip xray geoip.dat geosite.dat -d bin/
+          chmod +x bin/xray
+          ./bin/xray version
+
+      - name: Run contract test
+        env:
+          PROVIDER_TEST_BASE_URL: ${{ secrets.PROVIDER_TEST_BASE_URL }}
+          PROVIDER_TEST_API_KEY: ${{ secrets.PROVIDER_TEST_API_KEY }}
+          PROVIDER_TEST_MODEL: ${{ secrets.PROVIDER_TEST_MODEL }}
+        run: npm run test:provider
+
+  # ---------------------------------------------------------------------------
+  # Full integration. Manual, and requires a seeded pool: restore a data/
+  # directory that already contains at least two working configs.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Full integration (manual, seeded pool)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Fetch Xray-core
+        run: |
+          mkdir -p bin
+          curl -fsSL "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-64.zip" -o /tmp/xray.zip
+          unzip -q -o /tmp/xray.zip xray geoip.dat geosite.dat -d bin/
+          chmod +x bin/xray
+
+      - name: Restore seeded data directory
+        env:
+          DATA_ARCHIVE_URL: ${{ secrets.DATA_ARCHIVE_URL }}
+        run: |
+          if [ -z "$DATA_ARCHIVE_URL" ]; then
+            echo "::error::DATA_ARCHIVE_URL secret is not set; cannot seed the egress pool."
+            exit 1
+          fi
+          mkdir -p data
+          curl -fsSL "$DATA_ARCHIVE_URL" -o /tmp/data.tgz
+          tar -xzf /tmp/data.tgz -C data --strip-components=1
+          ls -la data | head
+
+      - name: Start gateway
+        run: |
+          PORT=3001 MOCK_KEY_A=k MOCK_KEY_B=k npx tsx src/backend/server.ts > server.log 2>&1 &
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:3001/v1/health >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3001/v1/health
+
+      - name: Integration suites
+        env:
+          GATEWAY_URL: http://127.0.0.1:3001
+        run: |
+          npm run test:service
+          npm run test:routing
+          npm run test:gateway
+          npm run test:ops
+
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-log
+          path: server.log
+          retention-days: 3
