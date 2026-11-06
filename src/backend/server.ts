@@ -10,9 +10,16 @@ import { ConfigFetcher } from './discovery/config-fetcher';
 import { LatencyTester } from './tester/latency-tester';
 import { BulkPrescreener } from './tester/bulk-prescreener';
 import { HealthMonitor } from './tester/health-monitor';
+import { egressPool } from './vpn/egress-pool';
 import { KeyManager } from './gateway/key-manager';
 import { UpstreamClient } from './gateway/upstream-client';
 import { createGatewayRouter } from './gateway/openai-router';
+import { createServiceRouter } from './service/service-router';
+import { createAbuseGuard } from './service/abuse-guard';
+import { ProviderRegistry } from './providers/provider-registry';
+import { ProviderRouter } from './gateway/provider-router';
+import { CostModel } from './gateway/cost';
+import { FreshnessTracker } from './tester/freshness';
 import { PrivilegeWizard } from './security/privilege-wizard';
 import {
   createCorsMiddleware,
@@ -48,10 +55,19 @@ app.use('/v1', express.json({ limit: process.env.GATEWAY_MAX_BODY || '8mb' }));
 app.use(express.json({ limit: '10mb' }));
 
 // ---------------------------------------------------------------------------
+// Service surface (axis C): self-serve signup portal, public status page,
+// readiness probe, privacy/GDPR endpoints and abuse admin.
+// Mounted before the management auth middleware so the public pages and the
+// signup endpoint work without it; admin routes inside carry their own guard.
+// ---------------------------------------------------------------------------
+app.use(createServiceRouter());
+
+// ---------------------------------------------------------------------------
 // OpenAI-compatible gateway (/v1). Mounted BEFORE the management auth
 // middleware on purpose: it authenticates with its own `sk-or-...` keys and must
 // stay usable by external clients even when the admin API is locked down.
 // ---------------------------------------------------------------------------
+app.use('/v1', createAbuseGuard());
 app.use('/v1', createGatewayRouter());
 
 // Security Hardening: Mandatory Bearer token authentication for remote access
@@ -66,6 +82,15 @@ const opencode = OpenCodeService.getInstance();
 
 // Background health monitor (no-op when disabled in settings).
 HealthMonitor.start();
+
+// Serving pool: N independent Xray slots with a watchdog for automatic failover.
+egressPool.init();
+egressPool
+  .ensureAll()
+  .then((started) => {
+    if (started > 0) console.log(`[EgressPool] started ${started} slot(s)`);
+  })
+  .catch((err) => console.error('[EgressPool] init failed:', err?.message || err));
 
 // Server-Sent Events (SSE) clients
 const sseClients: Set<Response> = new Set();
@@ -199,6 +224,8 @@ app.get('/api/configs', (req: Request, res: Response) => {
       id, protocol, address, port, remark, security, network,
       last_tested_at, last_latency_ms, last_status, consecutive_failures, success_count, is_active,
       tcp_alive, tcp_latency_ms, egress_ip, health_score, last_health_check, prescreen_at,
+      last_error,
+      (SELECT name FROM sources WHERE sources.id = configs.source_id) AS source_name,
       created_at
     FROM configs
     ${whereStr}
@@ -398,6 +425,38 @@ app.get('/api/diagnostics', (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// Egress pool (B1/B2/B3): slots, failover, rotation, stickiness
+// ---------------------------------------------------------------------------
+app.get('/api/egress/status', (req: Request, res: Response) => {
+  res.json(egressPool.status());
+});
+
+app.post('/api/egress/ensure', async (req: Request, res: Response) => {
+  const started = await egressPool.ensureAll();
+  res.json({ success: true, started, status: egressPool.status() });
+});
+
+app.post('/api/egress/rotate/:slot', async (req: Request, res: Response) => {
+  const slot = parseInt(String(req.params.slot), 10);
+  if (!Number.isInteger(slot)) return res.status(400).json({ error: 'invalid slot index' });
+  const ok = await egressPool.rotateSlot(slot, 'manual');
+  res.json({ success: ok, status: egressPool.status() });
+});
+
+app.post('/api/egress/failover/:slot', async (req: Request, res: Response) => {
+  const slot = parseInt(String(req.params.slot), 10);
+  if (!Number.isInteger(slot)) return res.status(400).json({ error: 'invalid slot index' });
+  const ok = await egressPool.failoverSlot(slot, 'manual');
+  res.json({ success: ok, status: egressPool.status() });
+});
+
+app.post('/api/egress/reinit', async (req: Request, res: Response) => {
+  egressPool.init(req.body?.size);
+  const started = await egressPool.ensureAll();
+  res.json({ success: true, started, status: egressPool.status() });
+});
+
+// ---------------------------------------------------------------------------
 // Bulk TCP pre-screen
 // ---------------------------------------------------------------------------
 app.post('/api/configs/prescreen', (req: Request, res: Response) => {
@@ -545,7 +604,24 @@ const SETTING_WHITELIST = new Set([
   'gateway_rotate_on_5xx',
   'gateway_upstream_bypass_proxy_loopback',
   'gateway_stream_include_usage',
-  'gateway_quota_reserve_tokens'
+  'gateway_quota_reserve_tokens',
+  'gateway_provider_policy',
+  'gateway_max_provider_attempts',
+  'gateway_freshness_weight',
+  'pool_size',
+  // axis C service settings (C4 abuse, C5 onboarding, C6 status)
+  'signup_enabled',
+  'signup_max_per_ip_per_day',
+  'status_page_enabled',
+  'abuse_detection_enabled',
+  'abuse_window_seconds',
+  'abuse_429_threshold',
+  'abuse_duplicate_threshold',
+  'cost_tracking_enabled',
+  'spend_reserve_usd',
+  'pool_base_port',
+  'pool_drain_timeout_ms',
+  'pool_watchdog_interval_ms'
 ]);
 
 const SENSITIVE_SETTINGS = new Set(['gateway_upstream_base_url']);
@@ -617,6 +693,91 @@ app.put('/api/settings', (req: Request, res: Response) => {
   res.json({ success: true, applied, rejected });
 });
 
+// ---------------------------------------------------------------------------
+// D4 — providers
+// ---------------------------------------------------------------------------
+app.get('/api/providers', (req: Request, res: Response) => {
+  res.json({ providers: ProviderRegistry.list(), routing: ProviderRouter.status() });
+});
+
+app.post('/api/providers', (req: Request, res: Response) => {
+  try {
+    const provider = ProviderRegistry.create(req.body || {});
+    res.json({ success: true, provider });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'could not create provider' });
+  }
+});
+
+app.patch('/api/providers/:id', (req: Request, res: Response) => {
+  try {
+    const ok = ProviderRegistry.update(parseInt(String(req.params.id), 10), req.body || {});
+    res.status(ok ? 200 : 404).json({ success: ok });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'could not update provider' });
+  }
+});
+
+app.delete('/api/providers/:id', (req: Request, res: Response) => {
+  const ok = ProviderRegistry.remove(parseInt(String(req.params.id), 10));
+  res.status(ok ? 200 : 404).json({ success: ok });
+});
+
+// ---------------------------------------------------------------------------
+// D5 — prices and spend
+// ---------------------------------------------------------------------------
+app.get('/api/prices', (req: Request, res: Response) => {
+  res.json({ prices: CostModel.listPrices() });
+});
+
+app.put('/api/prices', (req: Request, res: Response) => {
+  try {
+    const { model, costPer1mIn, costPer1mOut } = req.body || {};
+    if (!model) return res.status(400).json({ error: 'model is required' });
+    CostModel.setPrice(model, Number(costPer1mIn) || 0, Number(costPer1mOut) || 0);
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'could not set price' });
+  }
+});
+
+app.get('/api/costs', (req: Request, res: Response) => {
+  const byKey = db
+    .prepare(
+      `SELECT key_id, COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens,
+              COALESCE(SUM(cost_usd), 0) AS cost_usd
+         FROM usage_log GROUP BY key_id ORDER BY cost_usd DESC`
+    )
+    .all();
+  const byProvider = db
+    .prepare(
+      `SELECT provider_id, COUNT(*) AS requests, COALESCE(SUM(cost_usd), 0) AS cost_usd
+         FROM usage_log GROUP BY provider_id ORDER BY cost_usd DESC`
+    )
+    .all();
+  res.json({
+    today_usd: CostModel.spendToday(),
+    month_usd: CostModel.spendThisMonth(),
+    by_key: byKey,
+    by_provider: byProvider
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2 — IP freshness
+// ---------------------------------------------------------------------------
+app.get('/api/freshness', (req: Request, res: Response) => {
+  res.json({
+    average_requests_before_429: FreshnessTracker.averageRequestsBefore429(),
+    nodes: FreshnessTracker.list(parseInt(String(req.query.limit || '50'), 10))
+  });
+});
+
+app.post('/api/freshness/recompute', (req: Request, res: Response) => {
+  const count = FreshnessTracker.recomputeAll();
+  res.json({ success: true, recomputed: count });
+});
+
 // Serve static frontend files if built
 const frontendDist = path.resolve(__dirname, '../frontend/dist');
 if (fs.existsSync(frontendDist)) {
@@ -635,9 +796,43 @@ export function startServer(port: number = PORT, host?: string) {
   validateRemoteBindingConfig(bindHost, process.env.OPENCODE_ROUTER_API_KEY);
   setActiveBindHost(bindHost);
 
-  return app.listen(port, bindHost, () => {
+  const server = app.listen(port, bindHost, () => {
     console.log(`[OpenCode Router] Backend server running on http://${bindHost}:${port}`);
   });
+
+  // Graceful shutdown: drain HTTP, then kill the Xray pool. Without this a
+  // restart leaves orphaned xray processes holding the pool ports.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[OpenCode Router] ${signal} received — shutting down`);
+    try {
+      server.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await egressPool.shutdown();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await VpnEngine.getInstance().stop();
+    } catch {
+      /* ignore */
+    }
+    setTimeout(() => process.exit(0), 200).unref?.();
+  };
+
+  process.once('SIGTERM', () => {
+    void shutdown('SIGTERM');
+  });
+  process.once('SIGINT', () => {
+    void shutdown('SIGINT');
+  });
+
+  return server;
 }
 
 if (require.main === module) {

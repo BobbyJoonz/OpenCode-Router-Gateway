@@ -1,6 +1,7 @@
 import { db } from '../db/database';
 import { ConfigParser, ParsedConfig } from '../parser/config-parser';
 import { XrayJsonImporter } from '../parser/xray-json-importer';
+import { parseClash, parseSingbox, detectStructuredFormat } from '../parser/structured-importers';
 import { sanitizeSubscriptionUrl } from '../security/api-guard';
 
 export interface SourceRow {
@@ -186,16 +187,25 @@ export class ConfigFetcher {
       }
     }
 
-    // A complete Xray/V2Ray client config.json is accepted alongside share links.
+    // Structured formats (full client configs) are accepted alongside share links:
+    //   Xray/V2Ray config.json, sing-box config.json, Clash/Clash.Meta YAML.
     const trimmedContent = content.trim();
-    const isJsonConfig = trimmedContent.startsWith('{') || trimmedContent.startsWith('[');
-    const parsedItems: (ParsedConfig | null)[] = isJsonConfig
-      ? XrayJsonImporter.parse(trimmedContent)
-      : content
-          .split(/[\r\n]+/)
-          .map((l) => l.trim())
-          .filter((l) => l && !l.startsWith('#'))
-          .map((l) => ConfigParser.parse(l));
+    const format = detectStructuredFormat(trimmedContent);
+
+    let parsedItems: (ParsedConfig | null)[];
+    if (format === 'clash') {
+      parsedItems = parseClash(trimmedContent);
+    } else if (format === 'singbox') {
+      parsedItems = parseSingbox(trimmedContent);
+    } else if (format === 'xray') {
+      parsedItems = XrayJsonImporter.parse(trimmedContent);
+    } else {
+      parsedItems = content
+        .split(/[\r\n]+/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'))
+        .map((l) => ConfigParser.parse(l));
+    }
 
     const insertStmt = db.prepare(`
       INSERT INTO configs (

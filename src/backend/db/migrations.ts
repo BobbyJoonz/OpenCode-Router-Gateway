@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { runServiceMigrations } from './service-migrations';
 
 /**
  * Schema migrations for the "gateway" edition.
@@ -70,6 +71,45 @@ export function runMigrations(db: Database.Database): void {
       status       TEXT DEFAULT 'running',   -- running | done | aborted | error
       error        TEXT
     );
+
+    -- ------------------------------------------------------------------
+    -- D4: independent upstream providers (free / cheap / primary)
+    -- ------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS providers (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      name            TEXT NOT NULL UNIQUE,
+      kind            TEXT NOT NULL DEFAULT 'openai',   -- openai | anthropic | custom
+      base_url        TEXT NOT NULL,
+      key_env         TEXT NOT NULL,                    -- env var NAME, never the key
+      model           TEXT,
+      priority        INTEGER NOT NULL DEFAULT 100,     -- lower wins
+      cost_per_1m_in  REAL NOT NULL DEFAULT 0,
+      cost_per_1m_out REAL NOT NULL DEFAULT 0,
+      rpm_limit       INTEGER NOT NULL DEFAULT 0,
+      daily_usd_cap   REAL NOT NULL DEFAULT 0,
+      enabled         INTEGER NOT NULL DEFAULT 1,
+      created_at      TEXT DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS provider_events (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider_id INTEGER REFERENCES providers(id) ON DELETE CASCADE,
+      event       TEXT NOT NULL,   -- success | rate_limit | auth | server | timeout | failover
+      status_code INTEGER,
+      latency_ms  INTEGER,
+      created_at  TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_provider_events_time ON provider_events(provider_id, created_at);
+
+    -- ------------------------------------------------------------------
+    -- D5: pricing and spend accounting
+    -- ------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS model_prices (
+      model           TEXT PRIMARY KEY,
+      cost_per_1m_in  REAL NOT NULL DEFAULT 0,
+      cost_per_1m_out REAL NOT NULL DEFAULT 0,
+      updated_at      TEXT DEFAULT (datetime('now'))
+    );
   `);
 
   // ---- additive columns on configs -------------------------------------
@@ -88,6 +128,26 @@ export function runMigrations(db: Database.Database): void {
   addColumn('last_health_check', 'TEXT');
   addColumn('bandwidth_bytes', 'INTEGER DEFAULT 0');
   addColumn('prescreen_at', 'TEXT');
+  addColumn('last_error', 'TEXT');
+
+  // D2: IP freshness instrumentation
+  addColumn('rate_limit_hits', 'INTEGER DEFAULT 0');
+  addColumn('success_streak', 'INTEGER DEFAULT 0');
+  addColumn('last_429_at', 'TEXT');
+  addColumn('requests_before_429', 'INTEGER');
+  addColumn('freshness_score', 'REAL DEFAULT 100');
+
+  // D4/D5: columns added to tables created earlier in this migration
+  const addColumnTo = (table: string, name: string, ddl: string) => {
+    const existing = new Set(
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
+  };
+  addColumnTo('usage_log', 'provider_id', 'INTEGER');
+  addColumnTo('usage_log', 'cost_usd', 'REAL DEFAULT 0');
+  addColumnTo('api_keys', 'spend_cap_usd_daily', 'REAL DEFAULT 0');
+  addColumnTo('api_keys', 'spend_cap_usd_monthly', 'REAL DEFAULT 0');
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_tcp ON configs(tcp_alive)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_health ON configs(health_score)`);
@@ -114,7 +174,16 @@ export function runMigrations(db: Database.Database): void {
     gateway_rotate_on_5xx: 'false',
     gateway_upstream_bypass_proxy_loopback: 'true',
     gateway_stream_include_usage: 'true',
-    gateway_quota_reserve_tokens: '2000'
+    gateway_quota_reserve_tokens: '2000',
+    // serving pool (B1/B2/B3)
+    pool_size: '2',
+    pool_base_port: '12000',
+    pool_drain_timeout_ms: '15000',
+    pool_watchdog_interval_ms: '2000',
+    // D4/D5
+    gateway_provider_policy: 'priority',       // priority | cost | round_robin
+    gateway_max_provider_attempts: '3',
+    gateway_freshness_weight: '0.2'
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {
@@ -123,4 +192,7 @@ export function runMigrations(db: Database.Database): void {
 
   // Mark prescreen runs that were interrupted by a crash as aborted.
   db.prepare(`UPDATE prescreen_runs SET status = 'aborted', finished_at = datetime('now') WHERE status = 'running'`).run();
+
+  // Axis C (service edition) schema.
+  runServiceMigrations(db);
 }

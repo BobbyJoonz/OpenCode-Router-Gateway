@@ -1,75 +1,78 @@
-{
-  "name": "opencode-router-gateway",
-  "version": "2.0.0",
-  "description": "OpenAI-compatible gateway with rotating Xray egress. Adds /v1 chat completions, API keys, quotas, bulk TCP pre-screening and a background node health monitor on top of OpenCode Router.",
-  "main": "src/backend/server.ts",
-  "author": "OpenCode Router Gateway contributors (based on OpenCode Router by Ehsan Shahriyari)",
-  "license": "MIT",
-  "homepage": "https://github.com/BobbyJoonz/OpenCode-Router-Gateway",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/BobbyJoonz/OpenCode-Router-Gateway.git"
-  },
-  "bugs": {
-    "url": "https://github.com/BobbyJoonz/OpenCode-Router-Gateway/issues"
-  },
-  "scripts": {
-    "build:frontend": "cd src/frontend && npx vite build",
-    "build": "npm run build:frontend",
-    "start": "npx tsx src/backend/server.ts",
-    "dev:backend": "npx tsx watch src/backend/server.ts",
-    "dev:frontend": "cd src/frontend && npx vite",
-    "typecheck": "tsc --noEmit",
-    "test": "npx tsx tests/test-scenarios.ts",
-    "test:gateway": "npx tsx tests/gateway-tests.ts",
-    "test:all": "npm run typecheck && npm test && npm run test:gateway",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
-  },
-  "keywords": [
-    "opencode",
-    "opencode-router",
-    "openai-compatible",
-    "gateway",
-    "api-gateway",
-    "llm-proxy",
-    "v2ray",
-    "xray",
-    "vless",
-    "vmess",
-    "trojan",
-    "shadowsocks",
-    "proxy",
-    "egress-ip",
-    "rate-limit",
-    "rotation"
-  ],
-  "type": "commonjs",
-  "dependencies": {
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/node": "^26.6.6",
-    "better-sqlite3": "12.6.2",
-    "cors": "^2.8.6",
-    "express": "^5.3.0",
-    "lucide-react": "^1.68.0",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1",
-    "tsx": "^4.23.15",
-    "typescript": "^7.0.2",
-    "undici": "^7.30.2"
-  },
-  "devDependencies": {
-    "@tailwindcss/vite": "^4.3.4",
-    "@types/better-sqlite3": "^9.6.0",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.2.1",
-    "autoprefixer": "^10.6.2",
-    "postcss": "^8.5.32",
-    "tailwindcss": "^4.3.4",
-    "vite": "^8.3.5",
-    "vitepress": "^1.6.4"
-  }
+﻿{
+    "name":  "opencode-router-gateway",
+    "version":  "3.0.0",
+    "description":  "OpenAI-compatible gateway with a rotating Xray egress pool: /v1 chat completions, API keys, spend caps, abuse detection, self-serve onboarding, health monitoring, multi-provider routing and deployment assets.",
+    "main":  "src/backend/server.ts",
+    "author":  "OpenCode Router Gateway contributors (based on OpenCode Router by Ehsan Shahriyari)",
+    "license":  "MIT",
+    "homepage":  "https://github.com/BobbyJoonz/OpenCode-Router-Gateway",
+    "repository":  {
+                       "type":  "git",
+                       "url":  "https://github.com/BobbyJoonz/OpenCode-Router-Gateway.git"
+                   },
+    "bugs":  {
+                 "url":  "https://github.com/BobbyJoonz/OpenCode-Router-Gateway/issues"
+             },
+    "scripts":  {
+                    "build:frontend":  "cd src/frontend \u0026\u0026 npx vite build",
+                    "build":  "npm run build:frontend",
+                    "start":  "npx tsx src/backend/server.ts",
+                    "dev:backend":  "npx tsx watch src/backend/server.ts",
+                    "dev:frontend":  "cd src/frontend \u0026\u0026 npx vite",
+                    "typecheck":  "tsc --noEmit",
+                    "test":  "npx tsx tests/test-scenarios.ts",
+                    "test:gateway":  "npx tsx tests/gateway-tests.ts",
+                    "test:all":  "npm run typecheck \u0026\u0026 npm test \u0026\u0026 npm run test:gateway \u0026\u0026 npm run test:service",
+                    "docs:dev":  "vitepress dev docs",
+                    "docs:build":  "vitepress build docs",
+                    "docs:preview":  "vitepress preview docs",
+                    "test:service":  "npx tsx tests/service-tests.ts",
+                    "test:rotation":  "npx tsx tools/rotation-experiment/run.ts"
+                },
+    "keywords":  [
+                     "opencode",
+                     "opencode-router",
+                     "openai-compatible",
+                     "gateway",
+                     "api-gateway",
+                     "llm-proxy",
+                     "v2ray",
+                     "xray",
+                     "vless",
+                     "vmess",
+                     "trojan",
+                     "shadowsocks",
+                     "proxy",
+                     "egress-ip",
+                     "rate-limit",
+                     "rotation"
+                 ],
+    "type":  "commonjs",
+    "dependencies":  {
+                         "@types/cors":  "^2.8.19",
+                         "@types/express":  "^5.0.6",
+                         "@types/node":  "^26.6.6",
+                         "better-sqlite3":  "12.6.2",
+                         "cors":  "^2.8.6",
+                         "express":  "^5.3.0",
+                         "lucide-react":  "^1.68.0",
+                         "react":  "^19.3.1",
+                         "react-dom":  "^19.3.1",
+                         "tsx":  "^4.23.15",
+                         "typescript":  "^7.0.2",
+                         "undici":  "^7.30.2",
+                         "yaml":  "^2.9.1"
+                     },
+    "devDependencies":  {
+                            "@tailwindcss/vite":  "^4.3.4",
+                            "@types/better-sqlite3":  "^9.6.0",
+                            "@types/react":  "^19.3.0",
+                            "@types/react-dom":  "^19.3.0",
+                            "@vitejs/plugin-react":  "^6.2.1",
+                            "autoprefixer":  "^10.6.2",
+                            "postcss":  "^8.5.32",
+                            "tailwindcss":  "^4.3.4",
+                            "vite":  "^8.3.5",
+                            "vitepress":  "^1.6.4"
+                        }
 }

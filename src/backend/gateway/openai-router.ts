@@ -3,8 +3,8 @@ import { db, getSetting } from '../db/database';
 import { KeyManager, ApiKeyRow } from './key-manager';
 import { UpstreamClient } from './upstream-client';
 import { classifyHttp, classifyNetwork, openAiError } from './error-mapper';
-import { VpnEngine } from '../vpn/vpn-engine';
-import { isRoutableEgressAddress } from './egress-filter';
+import { egressPool } from '../vpn/egress-pool';
+import { XraySlot } from '../vpn/xray-slot';
 
 interface GatewayRequest extends Request {
   apiKey?: ApiKeyRow;
@@ -12,15 +12,6 @@ interface GatewayRequest extends Request {
 
 const MAX_ATTEMPTS = 2;
 const MAX_SSE_BUFFER = 2 * 1024 * 1024;
-
-let startLock: Promise<boolean> | null = null;
-
-function proxyPorts(): { socks: number; http: number } {
-  return {
-    socks: parseInt(getSetting('socks_port', '10808'), 10),
-    http: parseInt(getSetting('http_port', '10809'), 10)
-  };
-}
 
 function gatewayEnabled(): boolean {
   return getSetting('gateway_enabled', 'false') === 'true';
@@ -41,107 +32,6 @@ function toNonNegativeInt(value: any): number {
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
 }
 
-/**
- * Pick the healthiest *routable* candidate. Rows with loopback/private addresses
- * are skipped: they are artefacts and would poison the rotation.
- */
-function pickCandidate(excludeId: number | null): any | null {
-  const rows = db
-    .prepare(
-      `SELECT * FROM configs
-        WHERE last_status = 'working'
-          AND (? IS NULL OR id != ?)
-        ORDER BY COALESCE(health_score, 100) DESC, COALESCE(last_latency_ms, 9999) ASC
-        LIMIT 200`
-    )
-    .all(excludeId, excludeId) as any[];
-
-  return rows.find((row) => isRoutableEgressAddress(row.address)) || null;
-}
-
-/**
- * Make sure *some* node is serving before we accept model traffic.
- *
- * Shares `startLock` with rotateNode: two cold-start requests must not both call
- * `VpnEngine.start()` (whose first action is `stop()`), or they kill each other.
- */
-async function ensureConnection(): Promise<boolean> {
-  const vpn = VpnEngine.getInstance();
-  if (vpn.getActiveConfig()) return true;
-
-  if (startLock) {
-    try {
-      await startLock;
-    } catch {
-      /* fall through */
-    }
-    return !!vpn.getActiveConfig();
-  }
-
-  const task = (async () => {
-    const row = pickCandidate(null);
-    if (!row) return false;
-
-    const { socks, http } = proxyPorts();
-    try {
-      const ok = await vpn.start(row, socks, http);
-      if (ok) {
-        db.prepare('UPDATE configs SET is_active = 0').run();
-        db.prepare('UPDATE configs SET is_active = 1 WHERE id = ?').run(row.id);
-      }
-      return ok;
-    } catch (err: any) {
-      console.error('[Gateway] could not start egress node:', err?.message || err);
-      return false;
-    }
-  })();
-
-  startLock = task;
-  try {
-    return await task;
-  } finally {
-    startLock = null;
-  }
-}
-
-/**
- * Switch to the next healthy node. Serialized so two concurrent 429s cannot
- * fight over the single Xray process.
- */
-async function rotateNode(): Promise<boolean> {
-  if (startLock) return startLock;
-
-  const task = (async () => {
-    const vpn = VpnEngine.getInstance();
-    const current = vpn.getActiveConfig();
-    const currentId = current ? current.id : null;
-    const { socks, http } = proxyPorts();
-
-    const row = pickCandidate(currentId);
-    if (!row) return false;
-
-    try {
-      const ok = await vpn.start(row, socks, http);
-      if (ok) {
-        db.prepare('UPDATE configs SET is_active = 0').run();
-        db.prepare('UPDATE configs SET is_active = 1 WHERE id = ?').run(row.id);
-        console.log(`[Gateway] rotated egress to #${row.id} ${row.address}:${row.port}`);
-      }
-      return ok;
-    } catch (err: any) {
-      console.error('[Gateway] rotation failed:', err?.message || err);
-      return false;
-    }
-  })();
-
-  startLock = task;
-  try {
-    return await task;
-  } finally {
-    startLock = null;
-  }
-}
-
 function makeUsageScanner() {
   const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
   let buffer = '';
@@ -149,10 +39,7 @@ function makeUsageScanner() {
   return {
     push(chunk: Buffer): void {
       buffer += chunk.toString('utf8');
-      if (buffer.length > MAX_SSE_BUFFER) {
-        // Malformed or non-SSE payload: keep only the tail so we never grow without bound.
-        buffer = buffer.slice(-4096);
-      }
+      if (buffer.length > MAX_SSE_BUFFER) buffer = buffer.slice(-4096);
 
       let boundary = buffer.indexOf('\n\n');
       while (boundary !== -1) {
@@ -172,10 +59,9 @@ function makeUsageScanner() {
               usage.total_tokens = parsed.usage.total_tokens ?? usage.total_tokens;
             }
           } catch {
-            // partial JSON across chunk boundaries — ignore
+            /* partial JSON across chunk boundaries */
           }
         }
-
         boundary = buffer.indexOf('\n\n');
       }
     },
@@ -190,13 +76,14 @@ export function createGatewayRouter(): Router {
 
   // ---------------------------------------------------------------- health
   router.get('/health', (_req: Request, res: Response) => {
-    const vpn = VpnEngine.getInstance();
+    const pool = egressPool.status();
     // Unauthenticated endpoint: report liveness only, never the egress endpoint.
     res.json({
       status: 'ok',
       gateway_enabled: gatewayEnabled(),
       upstream_configured: UpstreamClient.isConfigured(),
-      connected: !!vpn.getActiveConfig()
+      ready_slots: pool.ready,
+      pool_size: pool.size
     });
   });
 
@@ -228,9 +115,6 @@ export function createGatewayRouter(): Router {
     }
 
     if (verified.key.daily_token_limit > 0) {
-      // Reserve a slice of the quota before forwarding so concurrent requests
-      // cannot all pass the check. Never reserve more than half the limit, or a
-      // small quota would be permanently unusable.
       const configured = Math.max(0, parseInt(getSetting('gateway_quota_reserve_tokens', '2000'), 10));
       const reserve = configured > 0 ? Math.min(configured, Math.max(1, Math.floor(verified.key.daily_token_limit / 2))) : 0;
       const used = KeyManager.tokensUsedToday(verified.key.id) + KeyManager.pendingFor(verified.key.id);
@@ -253,32 +137,38 @@ export function createGatewayRouter(): Router {
     const config = UpstreamClient.resolveConfig();
 
     if (config.baseUrl) {
-      try {
-        const forwarded = await UpstreamClient.forward({
-          method: 'GET',
-          path: '/models',
-          httpProxyPort: proxyPorts().http,
-          timeoutMs: 15000
-        });
-        if (forwarded.statusCode >= 200 && forwarded.statusCode < 300) {
-          const text = await UpstreamClient.readAll(forwarded.body);
-          forwarded.cleanup();
-          try {
-            res.json(JSON.parse(text));
-            return;
-          } catch {
-            // fall through to synthetic list
+      const slot = await egressPool.acquire(null);
+      if (slot) {
+        egressPool.track(slot);
+        try {
+          const forwarded = await UpstreamClient.forward({
+            method: 'GET',
+            path: '/models',
+            httpProxyPort: slot.httpPort,
+            timeoutMs: 15000
+          });
+          if (forwarded.statusCode >= 200 && forwarded.statusCode < 300) {
+            const text = await UpstreamClient.readAll(forwarded.body);
+            forwarded.cleanup();
+            try {
+              res.json(JSON.parse(text));
+              return;
+            } catch {
+              /* fall through */
+            }
+          } else {
+            try {
+              await UpstreamClient.readAll(forwarded.body);
+            } catch {
+              /* ignore */
+            }
+            forwarded.cleanup();
           }
-        } else {
-          try {
-            await UpstreamClient.readAll(forwarded.body);
-          } catch {
-            /* ignore */
-          }
-          forwarded.cleanup();
+        } catch {
+          /* upstream unreachable — answer with a synthetic list */
+        } finally {
+          egressPool.release(slot);
         }
-      } catch {
-        // upstream unreachable — still answer with a synthetic list
       }
     }
 
@@ -299,13 +189,13 @@ export function createGatewayRouter(): Router {
   // ---------------------------------------------------------------- usage
   router.get('/usage', authMiddleware, (req: GatewayRequest, res: Response) => {
     const key = req.apiKey!;
-    const today = KeyManager.tokensUsedToday(key.id);
     res.json({
       key: { id: key.id, name: key.name, prefix: key.key_prefix },
       total: KeyManager.usageSummary(key.id),
-      today_tokens: today,
+      today_tokens: KeyManager.tokensUsedToday(key.id),
       daily_token_limit: key.daily_token_limit,
-      rpm_limit: key.rpm_limit
+      rpm_limit: key.rpm_limit,
+      sticky_slots: egressPool.status().slots.map((s) => ({ slot: s.index, nodeId: s.node?.id ?? null }))
     });
   });
 
@@ -330,36 +220,44 @@ export function createGatewayRouter(): Router {
     const wantsStream = body.stream === true;
     const startedAt = Date.now();
 
-    // Ask the provider to emit token usage on the final SSE chunk, otherwise
-    // streaming clients would bypass the daily quota entirely.
     let forwardBody = body;
     if (wantsStream && getSetting('gateway_stream_include_usage', 'true') === 'true') {
       const existing = body.stream_options && typeof body.stream_options === 'object' ? body.stream_options : {};
       forwardBody = { ...body, stream_options: { include_usage: true, ...existing } };
     }
 
-    // Make sure an egress node is up before we spend the request.
-    const connected = await ensureConnection();
-    if (!connected) {
-      res.status(503).json(openAiError('No working egress node is available. Run a workflow or a pre-screen first.', 'server_error', 'no_egress_node'));
-      return;
-    }
-
-    const activeBefore = VpnEngine.getInstance().getActiveConfig();
-
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const slot = await egressPool.acquire(key.id);
+      if (!slot) {
+        res.status(503).json(
+          openAiError('No working egress slot is available. Run a workflow or a pre-screen first.', 'server_error', 'no_egress_node')
+        );
+        return;
+      }
+
+      egressPool.track(slot);
+      let released = false;
+      const releaseOnce = () => {
+        if (released) return;
+        released = true;
+        egressPool.release(slot);
+      };
+      const nodeId = slot.node?.id ?? null;
+
       let forwarded;
       try {
         forwarded = await UpstreamClient.forward({
           method: 'POST',
           path: '/chat/completions',
-          httpProxyPort: proxyPorts().http,
+          httpProxyPort: slot.httpPort,
           body: forwardBody,
           accept: wantsStream ? 'text/event-stream' : 'application/json'
         });
       } catch (err: any) {
+        releaseOnce();
         const classification = classifyNetwork(err?.code);
-        if (classification.rotate && attempt < MAX_ATTEMPTS && (await rotateNode())) {
+        if (classification.rotate && attempt < MAX_ATTEMPTS) {
+          await egressPool.penalize(slot, `network error: ${err?.code || err?.message}`);
           continue;
         }
         KeyManager.recordUsage({
@@ -371,7 +269,7 @@ export function createGatewayRouter(): Router {
           statusCode: 502,
           latencyMs: Date.now() - startedAt,
           upstream: UpstreamClient.resolveConfig().baseUrl,
-          egressNodeId: VpnEngine.getInstance().getActiveConfig()?.id ?? null,
+          egressNodeId: nodeId,
           error: err?.code || 'upstream_network_error'
         });
         res.status(502).json(openAiError(`Upstream request failed: ${err?.message || 'network error'}`, 'server_error', 'upstream_unreachable'));
@@ -380,51 +278,55 @@ export function createGatewayRouter(): Router {
 
       const classification = classifyHttp(forwarded.statusCode, forwarded.headers['retry-after'] as any);
 
-      // ------------------------------------------------------ success
-      if (classification.class === 'ok') {
-        if (wantsStream) {
-          await pipeStream(req, res, forwarded, key, body, startedAt);
-        } else {
-          await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt);
+      try {
+        if (classification.class === 'ok') {
+          if (wantsStream) {
+            await pipeStream(req, res, forwarded, key, body, startedAt, nodeId);
+          } else {
+            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, nodeId);
+          }
+          return;
+        }
+
+        // retryable: rotate this slot away and try again on a fresh one
+        if (classification.rotate && attempt < MAX_ATTEMPTS) {
+          try {
+            await UpstreamClient.readAll(forwarded.body);
+          } catch {
+            /* drain */
+          }
+          forwarded.cleanup();
+          releaseOnce();
+          await egressPool.penalize(slot, `upstream ${forwarded.statusCode}`);
+          continue;
+        }
+
+        // pass through unchanged
+        const text = await UpstreamClient.readAll(forwarded.body).catch(() => '');
+        forwarded.cleanup();
+        KeyManager.recordUsage({
+          keyId: key.id,
+          model: body.model || null,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          statusCode: forwarded.statusCode,
+          latencyMs: Date.now() - startedAt,
+          upstream: UpstreamClient.resolveConfig().baseUrl,
+          egressNodeId: nodeId,
+          error: `upstream_${classification.class}`
+        });
+
+        res.status(forwarded.statusCode);
+        try {
+          res.json(JSON.parse(text));
+        } catch {
+          res.type('text/plain').send(text || 'Upstream error');
         }
         return;
+      } finally {
+        releaseOnce();
       }
-
-      // ------------------------------------------------------ retryable
-      if (classification.rotate && attempt < MAX_ATTEMPTS) {
-        try {
-          await UpstreamClient.readAll(forwarded.body);
-        } catch {
-          /* drain */
-        }
-        forwarded.cleanup();
-        if (await rotateNode()) continue;
-      }
-
-      // ------------------------------------------------------ pass through
-      const text = await UpstreamClient.readAll(forwarded.body).catch(() => '');
-      forwarded.cleanup();
-
-      KeyManager.recordUsage({
-        keyId: key.id,
-        model: body.model || null,
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-        statusCode: forwarded.statusCode,
-        latencyMs: Date.now() - startedAt,
-        upstream: UpstreamClient.resolveConfig().baseUrl,
-        egressNodeId: activeBefore?.id ?? null,
-        error: `upstream_${classification.class}`
-      });
-
-      res.status(forwarded.statusCode);
-      try {
-        res.json(JSON.parse(text));
-      } catch {
-        res.type('text/plain').send(text || 'Upstream error');
-      }
-      return;
     }
   });
 
@@ -437,7 +339,8 @@ async function relayJson(
   statusCode: number,
   key: ApiKeyRow,
   body: any,
-  startedAt: number
+  startedAt: number,
+  nodeId: number | null
 ): Promise<void> {
   let text = '';
   try {
@@ -463,7 +366,7 @@ async function relayJson(
     statusCode,
     latencyMs: Date.now() - startedAt,
     upstream: UpstreamClient.resolveConfig().baseUrl,
-    egressNodeId: VpnEngine.getInstance().getActiveConfig()?.id ?? null
+    egressNodeId: nodeId
   });
 
   if (parsed === null) {
@@ -479,7 +382,8 @@ async function pipeStream(
   forwarded: { body: any; cleanup: () => void },
   key: ApiKeyRow,
   body: any,
-  startedAt: number
+  startedAt: number,
+  nodeId: number | null
 ): Promise<void> {
   res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -541,8 +445,10 @@ async function pipeStream(
       statusCode: clientClosed ? 499 : 200,
       latencyMs: Date.now() - startedAt,
       upstream: UpstreamClient.resolveConfig().baseUrl,
-      egressNodeId: VpnEngine.getInstance().getActiveConfig()?.id ?? null,
+      egressNodeId: nodeId,
       error: clientClosed ? 'client_closed' : null
     });
   }
 }
+
+export type { XraySlot };
