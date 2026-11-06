@@ -161,6 +161,7 @@ export function runMigrations(db: Database.Database): void {
   addColumnTo('usage_log', 'cost_usd', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'spend_cap_usd_daily', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'spend_cap_usd_monthly', 'REAL DEFAULT 0');
+  addColumnTo('api_keys', 'egress_policy', "TEXT DEFAULT ''");
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_tcp ON configs(tcp_alive)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_health ON configs(health_score)`);
@@ -199,7 +200,8 @@ export function runMigrations(db: Database.Database): void {
     gateway_freshness_weight: '0.2',
     // Routing
     egress_policy: 'sticky',                   // sticky | round_robin | least_loaded | random
-    gateway_require_model_route: 'false'       // true => unknown model is a 404, never a passthrough
+    gateway_require_model_route: 'false',      // true => unknown model is a 404, never a passthrough
+    gateway_model_prefix_provider: 'false'      // true => 'provider/model' pins a provider
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

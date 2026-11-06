@@ -1,5 +1,13 @@
 import { Agent, ProxyAgent, request, Dispatcher } from 'undici';
+import { Readable } from 'stream';
 import { getSetting } from '../db/database';
+import {
+  ANTHROPIC_VERSION,
+  anthropicJsonToOpenAi,
+  anthropicModelsList,
+  anthropicSseToOpenAi,
+  toAnthropicRequest
+} from '../providers/anthropic-adapter';
 
 export interface UpstreamConfig {
   baseUrl: string;
@@ -19,6 +27,8 @@ export interface ForwardOptions {
   baseUrl?: string;
   /** Override the configured upstream key (resolved from the provider's env var). */
   apiKey?: string;
+  /** Provider flavour. `anthropic` triggers request/response translation. */
+  kind?: string;
 }
 
 export interface ForwardResult {
@@ -131,7 +141,21 @@ export class UpstreamClient {
       throw Object.assign(new Error('Upstream base URL is not configured'), { code: 'UPSTREAM_NOT_CONFIGURED' });
     }
 
-    const url = this.joinUrl(baseUrl, opts.path);
+    const kind = String(opts.kind || 'openai').toLowerCase();
+    const isAnthropic = kind === 'anthropic';
+
+    // Anthropic has no model-listing endpoint; answer locally so /v1/models works.
+    if (isAnthropic && opts.path === '/models') {
+      return {
+        statusCode: 200,
+        headers: { 'content-type': 'application/json' },
+        body: Readable.from([Buffer.from(anthropicModelsList(), 'utf8')]),
+        cleanup: () => undefined
+      };
+    }
+
+    const path = isAnthropic ? '/messages' : opts.path;
+    const url = this.joinUrl(baseUrl, path);
     const timeoutMs = opts.timeoutMs ?? config.timeoutMs;
     const apiKey = opts.apiKey !== undefined ? opts.apiKey : config.apiKey;
 
@@ -142,15 +166,23 @@ export class UpstreamClient {
       'content-type': 'application/json',
       accept: opts.accept || 'application/json'
     };
-    if (apiKey) {
+    if (isAnthropic) {
+      if (apiKey) headers['x-api-key'] = apiKey;
+      headers['anthropic-version'] = ANTHROPIC_VERSION;
+    } else if (apiKey) {
       headers.authorization = `Bearer ${apiKey}`;
     }
+
+    const payload =
+      opts.body === undefined
+        ? undefined
+        : JSON.stringify(isAnthropic ? toAnthropicRequest(opts.body) : opts.body);
 
     try {
       const response = await request(url, {
         method: opts.method,
         headers,
-        body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+        body: payload,
         dispatcher: this.dispatcherForTarget(url, opts.httpProxyPort),
         signal: controller.signal,
         headersTimeout: timeoutMs,
@@ -164,10 +196,19 @@ export class UpstreamClient {
         clearTimeout(timer);
       };
 
+      // Translate a successful Anthropic answer back into the OpenAI shape.
+      let responseBody: any = response.body;
+      if (isAnthropic && response.statusCode >= 200 && response.statusCode < 300) {
+        const contentType = String(response.headers['content-type'] || '');
+        responseBody = contentType.includes('text/event-stream')
+          ? (response.body as any).pipe(anthropicSseToOpenAi())
+          : (response.body as any).pipe(anthropicJsonToOpenAi());
+      }
+
       return {
         statusCode: response.statusCode,
         headers: response.headers as Record<string, string | string[] | undefined>,
-        body: response.body,
+        body: responseBody,
         cleanup
       };
     } catch (err: any) {

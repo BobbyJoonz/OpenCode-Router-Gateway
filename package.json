@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npx tsx tests/test-scenarios.ts",
     "test:gateway": "npx tsx tests/gateway-tests.ts",
-    "test:all": "npm run typecheck && npm test && npm run test:side-effects && npm run test:service && npm run test:routing && npm run test:gateway",
+    "test:all": "npm run typecheck && npm run test:anthropic && npm test && npm run test:side-effects && npm run test:service && npm run test:routing && npm run test:gateway",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
@@ -33,7 +33,8 @@
     "doctor:live": "npx tsx tools/doctor.ts --live",
     "test:provider": "npx tsx tests/provider-contract.test.ts",
     "backup": "npx tsx tools/backup.ts",
-    "test:routing": "npx tsx tests/routing-tests.ts"
+    "test:routing": "npx tsx tests/routing-tests.ts",
+    "test:anthropic": "npx tsx tests/anthropic-adapter.test.ts"
   },
   "keywords": [
     "opencode",

@@ -71,6 +71,40 @@ page, readiness/drain and a legal baseline.
 
 ---
 
+## [2.1.0] — Routing hardening
+
+Closes the five routing gaps documented in 2.0.
+
+### Added
+
+- **Body-aware upstream error classifier** (`gateway/upstream-errors.ts`):
+  distinguishes `model_missing`, `rate_limit`, `quota`, `auth`, `context_length`,
+  `invalid_request`, `content_filter`, `server` and `network` from status + body.
+- **Failover on 400/422 model-not-found**, not just 404. Deterministic errors
+  (context length, content filter, invalid request) are **never** retried on
+  another provider, and quota errors never rotate the egress IP.
+- **Client-side provider pinning**: `x-provider: <name|id>` header, plus optional
+  `provider/model` prefix mode (`gateway_model_prefix_provider`).
+- **Anthropic provider support** (`providers/anthropic-adapter.ts`): OpenAI
+  request -> Anthropic `/v1/messages`, and Anthropic JSON/SSE -> OpenAI
+  completions, including tools, images and usage.
+- **Per-key egress policy** (`api_keys.egress_policy`), inheriting the global
+  setting when empty.
+- **Loud route failures**: a route whose targets are unusable now returns
+  `503 model_route_unavailable` with the reason per provider instead of silently
+  falling back to passthrough.
+- `GET /api/models` reports per-target `available` / `reason`.
+
+### Tests
+
+- `tests/anthropic-adapter.test.ts` — 33 unit assertions (request, response,
+  streaming, robustness).
+- `tests/routing-tests.ts` — 32 assertions, now covering 400 failover,
+  deterministic-error passthrough, provider pinning, unusable routes and per-key
+  policy.
+
+---
+
 ## [2.0.0] — Gateway edition
 
 Turns the desktop node-finder into a server-side, OpenAI-compatible gateway.

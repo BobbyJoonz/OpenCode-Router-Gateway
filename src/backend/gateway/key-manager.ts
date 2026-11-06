@@ -14,6 +14,7 @@ export interface ApiKeyRow {
   total_tokens: number;
   spend_cap_usd_daily: number;
   spend_cap_usd_monthly: number;
+  egress_policy: string;
 }
 
 export interface CreatedKey {
@@ -26,6 +27,15 @@ export interface CreatedKey {
 export type VerifyResult =
   | { ok: true; key: ApiKeyRow }
   | { ok: false; reason: 'missing' | 'invalid' | 'disabled' };
+
+export const EGRESS_POLICIES = ['sticky', 'least_loaded', 'round_robin', 'random'] as const;
+export type EgressPolicy = (typeof EGRESS_POLICIES)[number];
+
+/** Empty string means "inherit the global egress_policy setting". */
+function normalizePolicy(value?: string): string {
+  const v = String(value || '').trim();
+  return (EGRESS_POLICIES as readonly string[]).includes(v) ? v : '';
+}
 
 /**
  * API-key issuance and verification for the OpenAI-compatible gateway.
@@ -47,6 +57,7 @@ export class KeyManager {
     dailyTokenLimit?: number;
     spendCapDailyUsd?: number;
     spendCapMonthlyUsd?: number;
+    egressPolicy?: string;
   }): CreatedKey {
     const name = (opts.name || '').trim();
     if (!name) throw new Error('name is required');
@@ -68,10 +79,10 @@ export class KeyManager {
     const info = db
       .prepare(
         `INSERT INTO api_keys
-           (key_hash, key_prefix, name, rpm_limit, daily_token_limit, enabled, spend_cap_usd_daily, spend_cap_usd_monthly)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+           (key_hash, key_prefix, name, rpm_limit, daily_token_limit, enabled, spend_cap_usd_daily, spend_cap_usd_monthly, egress_policy)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)`
       )
-      .run(keyHash, keyPrefix, name, rpm, daily, dailyCap, monthlyCap);
+      .run(keyHash, keyPrefix, name, rpm, daily, dailyCap, monthlyCap, normalizePolicy(opts.egressPolicy));
 
     return { id: Number(info.lastInsertRowid), key: secret, key_prefix: keyPrefix, name };
   }
@@ -82,7 +93,8 @@ export class KeyManager {
         `SELECT id, key_prefix, name, rpm_limit, daily_token_limit, enabled,
                 created_at, last_used_at, total_requests, total_tokens,
                 COALESCE(spend_cap_usd_daily, 0) AS spend_cap_usd_daily,
-                COALESCE(spend_cap_usd_monthly, 0) AS spend_cap_usd_monthly
+                COALESCE(spend_cap_usd_monthly, 0) AS spend_cap_usd_monthly,
+                COALESCE(egress_policy, '') AS egress_policy
            FROM api_keys ORDER BY id ASC`
       )
       .all() as ApiKeyRow[];
@@ -113,7 +125,8 @@ export class KeyManager {
         `SELECT id, key_prefix, name, rpm_limit, daily_token_limit, enabled,
                 created_at, last_used_at, total_requests, total_tokens,
                 COALESCE(spend_cap_usd_daily, 0) AS spend_cap_usd_daily,
-                COALESCE(spend_cap_usd_monthly, 0) AS spend_cap_usd_monthly
+                COALESCE(spend_cap_usd_monthly, 0) AS spend_cap_usd_monthly,
+                COALESCE(egress_policy, '') AS egress_policy
            FROM api_keys WHERE key_hash = ?`
       )
       .get(this.hash(secret)) as ApiKeyRow | undefined;

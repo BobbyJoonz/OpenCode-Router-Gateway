@@ -1,12 +1,16 @@
 import { getSetting } from '../db/database';
 import { ProviderRegistry, ProviderRow } from '../providers/provider-registry';
 import { ProviderSelector } from '../providers/provider-selector';
+import { Readable } from 'stream';
 import { ForwardOptions, ForwardResult, UpstreamClient } from './upstream-client';
+import { classifyUpstream, UpstreamErrorInfo } from './upstream-errors';
 
 export interface ProviderForwardResult {
   forwarded: ForwardResult;
   provider: ProviderRow;
   attempts: number;
+  /** classification of a non-2xx answer, when there was one */
+  error?: UpstreamErrorInfo;
 }
 
 export interface ProviderSelection {
@@ -99,58 +103,49 @@ export class ProviderRouter {
         const forwarded = await UpstreamClient.forward({
           ...forwardOpts,
           baseUrl: provider.base_url,
-          apiKey: ProviderRegistry.resolveApiKey(provider)
+          apiKey: ProviderRegistry.resolveApiKey(provider),
+          kind: provider.kind
         });
 
-        if (forwarded.statusCode >= 500) {
-          // Only fail over if there is actually another provider to try.
-          // Otherwise the caller decides (pass-through vs egress rotation).
-          const remaining = pinnedOrder
-            ? this.available().filter((p) => pinnedOrder.includes(p.id) && !tried.includes(p.id))
-            : ProviderSelector.candidates(tried);
-          if (remaining.length === 0) {
-            ProviderSelector.recordFailure(provider.id, 'server', forwarded.statusCode);
-            return { forwarded, provider, attempts: attempt };
-          }
-          try {
-            await UpstreamClient.readAll(forwarded.body);
-          } catch {
-            /* ignore */
-          }
-          forwarded.cleanup();
-          ProviderSelector.recordFailure(provider.id, 'server', forwarded.statusCode);
+        // ---------------------------------------------------------- success
+        if (forwarded.statusCode >= 200 && forwarded.statusCode < 300) {
+          ProviderSelector.recordSuccess(provider.id);
+          return { forwarded, provider, attempts: attempt };
+        }
+
+        // ------------------------------------------------- non-2xx: classify
+        // The body is needed to tell "model not found" (retry another provider)
+        // from "context too long" (retry is pointless) — the status code alone is
+        // not enough, because providers disagree on it.
+        const errorText = await UpstreamClient.readAll(forwarded.body).catch(() => '');
+        const headers = forwarded.headers;
+        forwarded.cleanup();
+        const info = classifyUpstream(forwarded.statusCode, errorText);
+
+        const remaining = pinnedOrder
+          ? this.available().filter((p) => pinnedOrder.includes(p.id) && !tried.includes(p.id))
+          : ProviderSelector.candidates(tried);
+
+        if (info.retryProvider && remaining.length > 0) {
+          ProviderSelector.recordFailure(provider.id, info.kind, forwarded.statusCode);
           continue;
         }
 
-        // A model-routed request may hit a provider that does not actually host
-        // the model (404). That is a routing miss, not a client error: try the
-        // next mapped provider.
-        if (pinnedOrder && forwarded.statusCode === 404) {
-          const remaining = this.available().filter((p) => pinnedOrder.includes(p.id) && !tried.includes(p.id));
-          if (remaining.length > 0) {
-            try {
-              await UpstreamClient.readAll(forwarded.body);
-            } catch {
-              /* ignore */
-            }
-            forwarded.cleanup();
-            ProviderSelector.recordFailure(provider.id, 'model_missing', 404);
-            continue;
-          }
-        }
+        ProviderSelector.recordFailure(provider.id, info.kind, forwarded.statusCode);
 
-        if (forwarded.statusCode === 429) {
-          ProviderSelector.recordFailure(provider.id, 'rate_limit', 429);
-          return { forwarded, provider, attempts: attempt };
-        }
-
-        if (forwarded.statusCode === 401 || forwarded.statusCode === 403) {
-          ProviderSelector.recordFailure(provider.id, 'auth', forwarded.statusCode);
-          return { forwarded, provider, attempts: attempt };
-        }
-
-        ProviderSelector.recordSuccess(provider.id);
-        return { forwarded, provider, attempts: attempt };
+        // Re-materialise the body so the caller can pass the provider's answer
+        // through unchanged.
+        return {
+          forwarded: {
+            statusCode: forwarded.statusCode,
+            headers,
+            body: Readable.from([Buffer.from(errorText, 'utf8')]),
+            cleanup: () => undefined
+          },
+          provider,
+          attempts: attempt,
+          error: info
+        };
       } catch (err: any) {
         lastError = err;
         ProviderSelector.recordFailure(provider.id, err?.code === 'UPSTREAM_TIMEOUT' ? 'timeout' : 'failover');

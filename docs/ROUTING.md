@@ -88,9 +88,58 @@ Setting: `gateway_provider_policy`
 |---|---|
 | HTTP 5xx | next provider (if any) |
 | network error / timeout | next provider |
-| HTTP 404 **and** a model route is active | next mapped provider |
-| HTTP 429 | returned to caller — caller rotates the **egress**, not the provider |
-| HTTP 401 / 403 | returned as-is; never rotate (auth is not a network problem) |
+| **model not found** — detected in the body, on **400 / 404 / 422** | next mapped provider |
+| HTTP 429 with `rate_limit` semantics | returned to caller — caller rotates the **egress**, not the provider |
+| HTTP 429 with **quota/billing** semantics | returned as-is; a new IP cannot help |
+| HTTP 401 / 403 | returned as-is; never rotate |
+| **context length / content filter / invalid request** | returned as-is; retrying anywhere is pointless |
+
+The last three rows are why status codes alone are not enough: a 400 can mean
+"bad parameter", "context too long" or "unknown model", and only the last one is
+worth retrying on another provider. `src/backend/gateway/upstream-errors.ts`
+classifies the body and the router obeys it.
+
+---
+
+## 2b. Pinning a provider from the client
+
+```bash
+# by name
+curl ... -H 'x-provider: openrouter' -d '{"model":"fast", ...}'
+
+# by id
+curl ... -H 'x-provider: 3' -d '{"model":"fast", ...}'
+```
+
+An unknown or credential-less provider returns `400 invalid_provider`.
+
+Alternatively, enable prefix mode and use `provider/model`:
+
+```bash
+curl -X PUT http://127.0.0.1:3000/api/settings \
+  -H 'content-type: application/json' -d '{"gateway_model_prefix_provider":"true"}'
+
+curl ... -d '{"model":"openrouter/anthropic/claude-3.5-sonnet", ...}'
+```
+
+---
+
+## 2c. Anthropic-shaped providers
+
+A provider with `kind: "anthropic"` is translated in both directions:
+
+- request: OpenAI `chat.completions` -> Anthropic `/v1/messages`
+  (system extraction, content parts, images, tools/tool_choice, stop)
+- response: Anthropic JSON or SSE -> OpenAI `chat.completion` / `chat.completion.chunk`
+  (content blocks, `tool_use` -> `tool_calls`, `input_tokens`/`output_tokens` -> usage,
+  `end_turn`/`max_tokens` -> `stop`/`length`)
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/providers -H 'content-type: application/json' -d '{
+  "name":"anthropic","kind":"anthropic",
+  "base_url":"https://api.anthropic.com/v1","key_env":"ANTHROPIC_API_KEY","priority":10
+}'
+```
 
 ---
 
@@ -104,6 +153,14 @@ Setting: `egress_policy`
 | `least_loaded` | slot with the fewest in-flight requests, ties broken by oldest |
 | `round_robin` | every acquire advances a cursor across ready slots |
 | `random` | uniform random over ready slots |
+
+**Per-key override.** A key can carry its own policy; an empty value inherits the
+global setting:
+
+```bash
+curl -X POST http://127.0.0.1:3000/api/keys -H 'content-type: application/json' \
+  -d '{"name":"batch","rpmLimit":300,"egressPolicy":"round_robin"}'
+```
 
 **When it switches slot:**
 
@@ -148,9 +205,11 @@ traffic.
 
 ## 6. Limitations
 
-- One alias can point at many providers, but there is **no per-request provider
-  choice** from the client — the route order decides.
-- `kind` is effectively OpenAI-shaped only; Anthropic-style upstreams need a
-  translation adapter (not implemented).
-- The egress policy is global, not per key. A future `key.egress_policy` column
-  would allow per-tenant policies.
+- One alias can point at many providers, and a client can pin one with
+  `x-provider`; there is still no way to pin an *egress slot* per request (only
+  the per-key policy).
+- Anthropic translation covers chat, streaming, tools and images. Beta features
+  (computer use, prompt caching headers, thinking budgets) are not mapped.
+- `kind` values other than `openai` and `anthropic` are treated as `openai`.
+- The model route order is the only fallback order; there is no health-aware
+  reordering inside one alias (provider health still gates availability).

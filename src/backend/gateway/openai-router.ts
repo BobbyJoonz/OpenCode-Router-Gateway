@@ -7,9 +7,9 @@ import { egressPool } from '../vpn/egress-pool';
 import { XraySlot } from '../vpn/xray-slot';
 import { ProviderRouter } from './provider-router';
 import { ModelRouter } from './model-router';
+import { ProviderRegistry, ProviderRow } from '../providers/provider-registry';
 import { FreshnessTracker } from '../tester/freshness';
 import { costOf, spendToday, spendThisMonth } from './cost';
-import { ProviderRow } from '../providers/provider-registry';
 
 interface GatewayRequest extends Request {
   apiKey?: ApiKeyRow;
@@ -35,6 +35,47 @@ function authFailure(res: Response, reason: 'missing' | 'invalid' | 'disabled'):
 function toNonNegativeInt(value: any): number {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+
+type ExplicitProvider =
+  | { kind: 'none' }
+  | { kind: 'invalid'; value: string }
+  | { kind: 'ok'; provider: ProviderRow; model: string };
+
+/**
+ * Client-side provider pinning.
+ *
+ *   x-provider: 3            (id)
+ *   x-provider: openrouter   (name, case-insensitive)
+ *
+ * Optionally also `provider/model` prefixes, when
+ * `gateway_model_prefix_provider=true`.
+ */
+function resolveExplicitProvider(req: Request, model: string | undefined): ExplicitProvider {
+  const rawHeader = String((req.headers['x-provider'] as string) || '').trim();
+
+  if (rawHeader) {
+    const providers = ProviderRegistry.list().filter((p) => p.enabled);
+    const byId = providers.find((p) => String(p.id) === rawHeader);
+    const byName = providers.find((p) => p.name.toLowerCase() === rawHeader.toLowerCase());
+    const provider = byId || byName;
+    if (!provider) return { kind: 'invalid', value: rawHeader };
+    if (!ProviderRegistry.hasKey(provider)) return { kind: 'invalid', value: `${rawHeader} (no credential)` };
+    return { kind: 'ok', provider, model: String(model || provider.model || '') };
+  }
+
+  if (getSetting('gateway_model_prefix_provider', 'false') === 'true' && model && model.includes('/')) {
+    const [prefix, ...rest] = model.split('/');
+    const provider = ProviderRegistry.list().find(
+      (p) => p.enabled && p.name.toLowerCase() === prefix.toLowerCase()
+    );
+    if (provider && rest.length > 0) {
+      if (!ProviderRegistry.hasKey(provider)) return { kind: 'invalid', value: `${prefix} (no credential)` };
+      return { kind: 'ok', provider, model: rest.join('/') };
+    }
+  }
+
+  return { kind: 'none' };
 }
 
 function makeUsageScanner() {
@@ -150,14 +191,14 @@ export function createGatewayRouter(): Router {
   };
 
   // ---------------------------------------------------------------- models
-  router.get('/models', authMiddleware, async (_req: GatewayRequest, res: Response) => {
+  router.get('/models', authMiddleware, async (req: GatewayRequest, res: Response) => {
     const config = UpstreamClient.resolveConfig();
 
     // Upstream models are merged with the aliases, never substituted for them.
     const upstreamIds: string[] = [];
 
     if (ProviderRouter.hasProviders()) {
-      const slot = await egressPool.acquire(null);
+      const slot = await egressPool.acquire(null, req.apiKey?.egress_policy || undefined);
       if (slot) {
         egressPool.track(slot);
         try {
@@ -269,27 +310,59 @@ export function createGatewayRouter(): Router {
 
     // Resolve the client's model name into (provider, upstream model) pairs.
     // With routes configured this is what makes model selection deterministic.
-    const plan = ModelRouter.plan(body.model);
-    if (!plan) {
-      if (ModelRouter.requireRoute()) {
-        res.status(404).json(
+    // A client may pin a provider explicitly (x-provider header, or the
+    // provider/model prefix when enabled). That wins over alias routing.
+    const explicit = resolveExplicitProvider(req, body.model);
+    if (explicit.kind === 'invalid') {
+      res.status(400).json(
+        openAiError(
+          `Unknown or unusable provider '${explicit.value}'. See GET /api/providers.`,
+          'invalid_request_error',
+          'invalid_provider'
+        )
+      );
+      return;
+    }
+
+    let selection: { providerIds: number[]; modelByProvider: Record<number, string> } | undefined;
+
+    if (explicit.kind === 'ok') {
+      selection = { providerIds: [explicit.provider.id], modelByProvider: { [explicit.provider.id]: explicit.model } };
+    } else {
+      const plan = ModelRouter.plan(body.model);
+      if (!plan) {
+        if (ModelRouter.requireRoute()) {
+          res.status(404).json(
+            openAiError(
+              `The model '${body.model ?? ''}' is not routed. Configure a route (POST /api/models) or set gateway_require_model_route=false.`,
+              'invalid_request_error',
+              'model_not_found'
+            )
+          );
+          return;
+        }
+        if (!body.model) {
+          res.status(400).json(openAiError('"model" is required.', 'invalid_request_error', 'missing_model'));
+          return;
+        }
+      } else if (plan.providerIds.length === 0) {
+        // The route exists but none of its providers can serve it. This must be a
+        // loud, actionable error — never a silent passthrough to another provider.
+        const detail = plan.unavailable.map((u) => `${u.providerName}: ${u.reason}`).join('; ');
+        res.status(503).json(
           openAiError(
-            `The model '${body.model ?? ''}' is not routed. Configure a route (POST /api/models) or set gateway_require_model_route=false.`,
-            'invalid_request_error',
-            'model_not_found'
+            `Model '${plan.alias}' is routed but no target provider is usable (${detail}).`,
+            'server_error',
+            'model_route_unavailable'
           )
         );
         return;
       }
-      if (!body.model) {
-        res.status(400).json(openAiError('"model" is required.', 'invalid_request_error', 'missing_model'));
-        return;
-      }
+      selection = plan ? { providerIds: plan.providerIds, modelByProvider: plan.modelByProvider } : undefined;
     }
-    const selection = plan ? { providerIds: plan.providerIds, modelByProvider: plan.modelByProvider } : undefined;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const slot = await egressPool.acquire(key.id);
+      const slot = await egressPool.acquire(key.id, key.egress_policy || undefined);
       if (!slot) {
         res.status(503).json(
           openAiError('No working egress slot is available. Run a workflow or a pre-screen first.', 'server_error', 'no_egress_node')
@@ -308,6 +381,7 @@ export function createGatewayRouter(): Router {
 
       let forwarded;
       let provider: ProviderRow | null = null;
+      let routedError: any = undefined;
       try {
         const routed = await ProviderRouter.forward({
           method: 'POST',
@@ -318,6 +392,7 @@ export function createGatewayRouter(): Router {
         }, selection);
         forwarded = routed.forwarded;
         provider = routed.provider;
+        routedError = routed.error;
       } catch (err: any) {
         releaseOnce();
         const classification = classifyNetwork(err?.code);
@@ -341,7 +416,17 @@ export function createGatewayRouter(): Router {
         return;
       }
 
+      // The classifier decides whether a fresh egress IP could help. A quota
+      // error, an auth error or a context-length error never triggers rotation.
+      if (routedError?.rotateEgress && attempt < MAX_ATTEMPTS) {
+        releaseOnce();
+        await egressPool.penalize(slot, `${routedError.kind}: ${routedError.message || 'upstream error'}`);
+        continue;
+      }
+
       const classification = classifyHttp(forwarded.statusCode, forwarded.headers['retry-after'] as any);
+      // Trust the body-aware classifier over the status-only heuristic.
+      if (routedError && !routedError.rotateEgress) classification.rotate = false;
 
       try {
         if (classification.class === 'ok') {

@@ -13,10 +13,12 @@ export interface ModelRoute {
 
 export interface ModelPlan {
   alias: string;
-  /** provider ids in the order they should be tried */
+  /** provider ids in the order they should be tried (only usable ones) */
   providerIds: number[];
   /** provider id -> the model name that provider expects */
   modelByProvider: Record<number, string>;
+  /** routes that exist but cannot be used right now */
+  unavailable: Array<{ providerId: number; providerName: string; reason: string }>;
 }
 
 /**
@@ -87,36 +89,47 @@ export class ModelRouter {
 
     const rows = db
       .prepare(
-        `SELECT r.*, p.enabled AS provider_enabled
+        `SELECT r.*, p.enabled AS provider_enabled, p.name AS provider_name, p.key_env AS provider_key_env
            FROM model_routes r
            JOIN providers p ON p.id = r.provider_id
-          WHERE r.alias = ? AND r.enabled = 1 AND p.enabled = 1
+          WHERE r.alias = ? AND r.enabled = 1
           ORDER BY r.priority ASC, r.id ASC`
       )
-      .all(name) as Array<ModelRoute & { provider_enabled: number }>;
+      .all(name) as Array<ModelRoute & { provider_enabled: number; provider_name: string; provider_key_env: string }>;
 
     if (rows.length === 0) return null;
 
-    // Only keep providers that actually have a usable key configured.
-    const available = new Map<number, ProviderRow>(
-      ProviderRegistry.enabled()
-        .filter((p) => ProviderRegistry.hasKey(p))
-        .map((p) => [p.id, p] as const)
-    );
-
-    const usable = rows.filter((r) => available.has(r.provider_id));
-    if (usable.length === 0) return null;
-
     const modelByProvider: Record<number, string> = {};
-    for (const row of usable) {
-      modelByProvider[row.provider_id] = row.upstream_model;
+    const providerIds: number[] = [];
+    const unavailable: Array<{ providerId: number; providerName: string; reason: string }> = [];
+
+    for (const row of rows) {
+      const provider = ProviderRegistry.get(row.provider_id);
+      if (!provider) {
+        unavailable.push({ providerId: row.provider_id, providerName: row.provider_name, reason: 'provider deleted' });
+        continue;
+      }
+      if (!provider.enabled) {
+        unavailable.push({ providerId: provider.id, providerName: provider.name, reason: 'provider disabled' });
+        continue;
+      }
+      if (!ProviderRegistry.hasKey(provider)) {
+        // Do NOT drop this silently: the caller must be able to report that the
+        // route exists but its provider has no credentials.
+        unavailable.push({
+          providerId: provider.id,
+          providerName: provider.name,
+          reason: `missing credential (env ${provider.key_env})`
+        });
+        continue;
+      }
+      providerIds.push(provider.id);
+      modelByProvider[provider.id] = row.upstream_model;
     }
 
-    return {
-      alias: name,
-      providerIds: usable.map((r) => r.provider_id),
-      modelByProvider
-    };
+    // A route exists, so this is not an "unrouted" model — even when every
+    // target is currently unusable. The caller distinguishes the two cases.
+    return { alias: name, providerIds, modelByProvider, unavailable };
   }
 
   /** Distinct aliases, used to build the public /v1/models list. */
@@ -129,21 +142,48 @@ export class ModelRouter {
   }
 
   /** Aliases grouped with their targets, for the admin API. */
-  public static describe(): Array<{ alias: string; targets: Array<{ provider: string; upstream_model: string; priority: number }> }> {
+  public static describe(): Array<{
+    alias: string;
+    targets: Array<{ provider: string; upstream_model: string; priority: number; available: boolean; reason?: string }>;
+  }> {
     const rows = db
       .prepare(
-        `SELECT r.alias, r.upstream_model, r.priority, r.enabled, p.name AS provider_name
+        `SELECT r.alias, r.upstream_model, r.priority, r.enabled, r.provider_id,
+                p.name AS provider_name, p.key_env AS provider_key_env, p.enabled AS provider_enabled
            FROM model_routes r
            JOIN providers p ON p.id = r.provider_id
           ORDER BY r.alias ASC, r.priority ASC, r.id ASC`
       )
-      .all() as Array<{ alias: string; upstream_model: string; priority: number; enabled: number; provider_name: string }>;
+      .all() as Array<{
+      alias: string;
+      upstream_model: string;
+      priority: number;
+      enabled: number;
+      provider_id: number;
+      provider_name: string;
+      provider_key_env: string;
+      provider_enabled: number;
+    }>;
 
-    const byAlias = new Map<string, Array<{ provider: string; upstream_model: string; priority: number }>>();
+    const byAlias = new Map<
+      string,
+      Array<{ provider: string; upstream_model: string; priority: number; available: boolean; reason?: string }>
+    >();
+
     for (const row of rows) {
       if (!row.enabled) continue;
+      const provider = ProviderRegistry.get(row.provider_id);
+      const available = !!provider && !!provider.enabled && ProviderRegistry.hasKey(provider);
+      const reason = !provider
+        ? 'provider deleted'
+        : !provider.enabled
+          ? 'provider disabled'
+          : available
+            ? undefined
+            : `missing credential (env ${row.provider_key_env})`;
+
       const list = byAlias.get(row.alias) || [];
-      list.push({ provider: row.provider_name, upstream_model: row.upstream_model, priority: row.priority });
+      list.push({ provider: row.provider_name, upstream_model: row.upstream_model, priority: row.priority, available, reason });
       byAlias.set(row.alias, list);
     }
 

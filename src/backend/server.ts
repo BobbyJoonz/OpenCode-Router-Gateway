@@ -594,7 +594,10 @@ app.post('/api/keys', (req: Request, res: Response) => {
     const created = KeyManager.create({
       name: req.body?.name,
       rpmLimit: req.body?.rpmLimit,
-      dailyTokenLimit: req.body?.dailyTokenLimit
+      dailyTokenLimit: req.body?.dailyTokenLimit,
+      spendCapDailyUsd: req.body?.spendCapDailyUsd ?? req.body?.spend_cap_usd_daily,
+      spendCapMonthlyUsd: req.body?.spendCapMonthlyUsd ?? req.body?.spend_cap_usd_monthly,
+      egressPolicy: req.body?.egressPolicy ?? req.body?.egress_policy
     });
     res.json({
       success: true,
@@ -661,6 +664,7 @@ const SETTING_WHITELIST = new Set([
   'gateway_stream_include_usage',
   'egress_policy',
   'gateway_require_model_route',
+  'gateway_model_prefix_provider',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',

@@ -175,21 +175,22 @@ export class EgressPool {
   /**
    * Get a ready slot for a client, preferring its previously assigned one.
    */
-  public async acquire(keyId: number | null): Promise<XraySlot | null> {
+  public async acquire(keyId: number | null, policyOverride?: string): Promise<XraySlot | null> {
     const ready = this.slots.filter((s) => s.state === 'ready');
     if (ready.length === 0) {
       await this.ensureAll();
       const retry = this.slots.filter((s) => s.state === 'ready');
       if (retry.length === 0) return null;
-      return this.choose(retry, keyId);
+      return this.choose(retry, keyId, policyOverride);
     }
-    const chosen = this.choose(ready, keyId);
+    const chosen = this.choose(ready, keyId, policyOverride);
     if (chosen && keyId !== null) this.sticky.set(keyId, chosen.index);
     return chosen;
   }
 
-  private choose(candidates: XraySlot[], keyId: number | null): XraySlot {
-    const policy = getSetting('egress_policy', 'sticky');
+  private choose(candidates: XraySlot[], keyId: number | null, policyOverride?: string): XraySlot {
+    const override = String(policyOverride || '').trim();
+    const policy = override || getSetting('egress_policy', 'sticky');
 
     // round_robin: spread clients across slots regardless of stickiness.
     if (policy === 'round_robin') {
