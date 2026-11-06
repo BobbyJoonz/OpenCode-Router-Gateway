@@ -24,9 +24,7 @@ export class XrayConfigBuilder {
     const safeConfig = {
       ...config,
       details:
-        config.details && typeof config.details === 'object' && !Array.isArray(config.details)
-          ? config.details
-          : {}
+        config.details && typeof config.details === 'object' && !Array.isArray(config.details) ? config.details : {}
     };
     const outbound = this.buildOutbound(safeConfig);
 
@@ -164,7 +162,7 @@ export class XrayConfigBuilder {
     }
 
     // flow is only supported for tcp + (tls or reality)
-    const validFlow = (network === 'tcp' && (security === 'tls' || security === 'reality')) ? (details.flow || '') : '';
+    const validFlow = network === 'tcp' && (security === 'tls' || security === 'reality') ? details.flow || '' : '';
 
     return {
       tag: 'proxy',

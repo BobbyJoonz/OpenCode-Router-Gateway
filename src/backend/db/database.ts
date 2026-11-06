@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
-import path from 'path';
 import fs from 'fs';
+import path from 'path';
 import { runMigrations } from './migrations';
+import { dataDir } from '../paths';
 
-const DB_DIR = path.resolve(__dirname, '../../../data');
+const DB_DIR = dataDir();
 if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
 }
@@ -143,5 +144,7 @@ export function getSetting(key: string, defaultValue: string = ''): string {
 }
 
 export function setSetting(key: string, value: string): void {
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+  ).run(key, value);
 }

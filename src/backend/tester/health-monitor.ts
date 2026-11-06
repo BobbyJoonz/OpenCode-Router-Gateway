@@ -1,6 +1,6 @@
 import { db, getSetting } from '../db/database';
-import { EphemeralTunnelTester, ProbeRow } from './ephemeral-tunnel';
 import { BulkPrescreener } from './bulk-prescreener';
+import { EphemeralTunnelTester, type ProbeRow } from './ephemeral-tunnel';
 
 export interface HealthCheckSummary {
   checked: number;

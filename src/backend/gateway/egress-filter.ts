@@ -6,7 +6,10 @@
  * while silently talking to a service on the gateway itself.
  */
 export function isRoutableEgressAddress(address: string): boolean {
-  const a = String(address || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const a = String(address || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
   if (!a) return false;
 
   // Only loopback / link-local / unspecified are rejected: a self-hosted LAN

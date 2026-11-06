@@ -1,24 +1,24 @@
 import assert from 'assert';
-import http from 'http';
-import path from 'path';
 import fs from 'fs';
+import http from 'http';
 import os from 'os';
-import {
-  isLoopbackHost,
-  resolveBindHost,
-  getAllowedOrigins,
-  isAllowedOrigin,
-  isAllowedHost,
-  maskAddress,
-  sanitizeSubscriptionUrl,
-  validateRemoteBindingConfig,
-  constantTimeCompare,
-  setActiveBindHost,
-  SecurityConfigurationError,
-  DEFAULT_BIND_HOST
-} from '../src/backend/security/api-guard';
-import { safeWriteSensitiveFile, ensureSecureDirectory } from '../src/backend/security/file-guard';
+import path from 'path';
 import { ConfigFetcher } from '../src/backend/discovery/config-fetcher';
+import {
+  constantTimeCompare,
+  DEFAULT_BIND_HOST,
+  getAllowedOrigins,
+  isAllowedHost,
+  isAllowedOrigin,
+  isLoopbackHost,
+  maskAddress,
+  resolveBindHost,
+  SecurityConfigurationError,
+  sanitizeSubscriptionUrl,
+  setActiveBindHost,
+  validateRemoteBindingConfig
+} from '../src/backend/security/api-guard';
+import { ensureSecureDirectory, safeWriteSensitiveFile } from '../src/backend/security/file-guard';
 import { app, startServer } from '../src/backend/server';
 
 export async function runSecurityTests() {
@@ -77,15 +77,13 @@ export async function runSecurityTests() {
 
   // 3. DNS Rebinding / Host Header Validation
   console.log('▶ Security Test 3: Host Header Validation');
-  {
-    assert.strictEqual(isAllowedHost('localhost:3000', 3000, '127.0.0.1'), true);
-    assert.strictEqual(isAllowedHost('127.0.0.1:3000', 3000, '127.0.0.1'), true);
-    assert.strictEqual(isAllowedHost('[::1]:3000', 3000, '127.0.0.1'), true);
-    assert.strictEqual(isAllowedHost('evil-rebind.com:3000', 3000, '127.0.0.1'), false);
-    assert.strictEqual(isAllowedHost('192.168.1.100:3000', 3000, '127.0.0.1'), false);
+  assert.strictEqual(isAllowedHost('localhost:3000', 3000, '127.0.0.1'), true);
+  assert.strictEqual(isAllowedHost('127.0.0.1:3000', 3000, '127.0.0.1'), true);
+  assert.strictEqual(isAllowedHost('[::1]:3000', 3000, '127.0.0.1'), true);
+  assert.strictEqual(isAllowedHost('evil-rebind.com:3000', 3000, '127.0.0.1'), false);
+  assert.strictEqual(isAllowedHost('192.168.1.100:3000', 3000, '127.0.0.1'), false);
 
-    console.log('  ✔ Host header validation blocks DNS rebinding domains.\n');
-  }
+  console.log('  ✔ Host header validation blocks DNS rebinding domains.\n');
 
   // 4. Data Sanitization & Credential Masking
   console.log('▶ Security Test 4: Credential and Address Sanitization');
@@ -133,7 +131,10 @@ export async function runSecurityTests() {
     console.log(`  ✔ Confirmed listening socket: ${addr.address}:${addr.port} (IPv4 Loopback only).`);
 
     // Helper for HTTP requests
-    const makeRequest = (options: http.RequestOptions, bodyData?: string): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> => {
+    const makeRequest = (
+      options: http.RequestOptions,
+      bodyData?: string
+    ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> => {
       return new Promise((resolve, reject) => {
         const req = http.request({ port: TEST_PORT, host: '127.0.0.1', ...options }, (res) => {
           let body = '';
@@ -151,12 +152,16 @@ export async function runSecurityTests() {
       path: '/api/status',
       method: 'GET',
       headers: {
-        'Origin': 'http://localhost:5173',
-        'Host': `127.0.0.1:${TEST_PORT}`
+        Origin: 'http://localhost:5173',
+        Host: `127.0.0.1:${TEST_PORT}`
       }
     });
     assert.strictEqual(allowedRes.statusCode, 200);
-    assert.strictEqual(allowedRes.headers['access-control-allow-origin'], 'http://localhost:5173', 'Allowed origin must receive matching CORS header');
+    assert.strictEqual(
+      allowedRes.headers['access-control-allow-origin'],
+      'http://localhost:5173',
+      'Allowed origin must receive matching CORS header'
+    );
     console.log('  ✔ Allowed origin (http://localhost:5173) received Access-Control-Allow-Origin header.');
 
     // Subtest 5B: Disallowed Origin does NOT receive Access-Control-Allow-Origin
@@ -164,24 +169,35 @@ export async function runSecurityTests() {
       path: '/api/status',
       method: 'GET',
       headers: {
-        'Origin': 'http://evil.com',
-        'Host': `127.0.0.1:${TEST_PORT}`
+        Origin: 'http://evil.com',
+        Host: `127.0.0.1:${TEST_PORT}`
       }
     });
-    assert.strictEqual(disallowedRes.headers['access-control-allow-origin'], undefined, 'Disallowed origin must NOT receive Access-Control-Allow-Origin');
+    assert.strictEqual(
+      disallowedRes.headers['access-control-allow-origin'],
+      undefined,
+      'Disallowed origin must NOT receive Access-Control-Allow-Origin'
+    );
     console.log('  ✔ Disallowed origin (http://evil.com) denied CORS header.');
 
     // Subtest 5C: State-changing request from untrusted origin is blocked with 403 Forbidden
-    const csrfPostRes = await makeRequest({
-      path: '/api/workflow/start',
-      method: 'POST',
-      headers: {
-        'Origin': 'http://evil.com',
-        'Host': `127.0.0.1:${TEST_PORT}`,
-        'Content-Type': 'application/json'
-      }
-    }, JSON.stringify({}));
-    assert.strictEqual(csrfPostRes.statusCode, 403, 'Cross-origin state-changing request must be blocked with 403 Forbidden');
+    const csrfPostRes = await makeRequest(
+      {
+        path: '/api/workflow/start',
+        method: 'POST',
+        headers: {
+          Origin: 'http://evil.com',
+          Host: `127.0.0.1:${TEST_PORT}`,
+          'Content-Type': 'application/json'
+        }
+      },
+      JSON.stringify({})
+    );
+    assert.strictEqual(
+      csrfPostRes.statusCode,
+      403,
+      'Cross-origin state-changing request must be blocked with 403 Forbidden'
+    );
     const csrfJson = JSON.parse(csrfPostRes.body);
     assert.strictEqual(csrfJson.code, 'UNTRUSTED_ORIGIN');
     console.log('  ✔ State-changing POST from untrusted origin blocked with 403 (UNTRUSTED_ORIGIN).');
@@ -191,7 +207,7 @@ export async function runSecurityTests() {
       path: '/api/status',
       method: 'GET',
       headers: {
-        'Host': 'attacker-controlled-dns-rebind.com'
+        Host: 'attacker-controlled-dns-rebind.com'
       }
     });
     assert.strictEqual(rebindRes.statusCode, 403, 'DNS rebinding Host header must be blocked with 403 Forbidden');
@@ -204,7 +220,7 @@ export async function runSecurityTests() {
       path: '/api/status',
       method: 'GET',
       headers: {
-        'Host': `127.0.0.1:${TEST_PORT}`
+        Host: `127.0.0.1:${TEST_PORT}`
       }
     });
     assert.strictEqual(cliRes.statusCode, 200, 'Legitimate local CLI request must succeed');
@@ -217,54 +233,52 @@ export async function runSecurityTests() {
 
   // 6. Remote Binding & API Key Validation (Mandatory API Key)
   console.log('▶ Security Test 6: Remote Binding Enforcement and API Key Validation');
-  {
-    // Non-loopback binding without API key throws SecurityConfigurationError
-    assert.throws(
-      () => validateRemoteBindingConfig('0.0.0.0', undefined),
-      SecurityConfigurationError,
-      'Binding to 0.0.0.0 without API key must throw SecurityConfigurationError'
-    );
-    assert.throws(
-      () => validateRemoteBindingConfig('0.0.0.0', ''),
-      SecurityConfigurationError,
-      'Binding to 0.0.0.0 with empty API key must throw SecurityConfigurationError'
-    );
-    assert.throws(
-      () => validateRemoteBindingConfig('0.0.0.0', '   '),
-      SecurityConfigurationError,
-      'Binding to 0.0.0.0 with whitespace API key must throw SecurityConfigurationError'
-    );
-    assert.throws(
-      () => validateRemoteBindingConfig('192.168.1.50', undefined),
-      SecurityConfigurationError,
-      'Binding to LAN IP without API key must throw SecurityConfigurationError'
-    );
+  // Non-loopback binding without API key throws SecurityConfigurationError
+  assert.throws(
+    () => validateRemoteBindingConfig('0.0.0.0', undefined),
+    SecurityConfigurationError,
+    'Binding to 0.0.0.0 without API key must throw SecurityConfigurationError'
+  );
+  assert.throws(
+    () => validateRemoteBindingConfig('0.0.0.0', ''),
+    SecurityConfigurationError,
+    'Binding to 0.0.0.0 with empty API key must throw SecurityConfigurationError'
+  );
+  assert.throws(
+    () => validateRemoteBindingConfig('0.0.0.0', '   '),
+    SecurityConfigurationError,
+    'Binding to 0.0.0.0 with whitespace API key must throw SecurityConfigurationError'
+  );
+  assert.throws(
+    () => validateRemoteBindingConfig('192.168.1.50', undefined),
+    SecurityConfigurationError,
+    'Binding to LAN IP without API key must throw SecurityConfigurationError'
+  );
 
-    // Non-loopback binding WITH API key succeeds
-    assert.doesNotThrow(
-      () => validateRemoteBindingConfig('0.0.0.0', 'secret-key-12345'),
-      'Binding to 0.0.0.0 with valid API key must succeed'
-    );
+  // Non-loopback binding WITH API key succeeds
+  assert.doesNotThrow(
+    () => validateRemoteBindingConfig('0.0.0.0', 'secret-key-12345'),
+    'Binding to 0.0.0.0 with valid API key must succeed'
+  );
 
-    // Loopback binding does not require API key (frictionless local usage)
-    assert.doesNotThrow(
-      () => validateRemoteBindingConfig('127.0.0.1', undefined),
-      'Loopback binding must not require API key'
-    );
-    assert.doesNotThrow(
-      () => validateRemoteBindingConfig('localhost', undefined),
-      'Localhost binding must not require API key'
-    );
+  // Loopback binding does not require API key (frictionless local usage)
+  assert.doesNotThrow(
+    () => validateRemoteBindingConfig('127.0.0.1', undefined),
+    'Loopback binding must not require API key'
+  );
+  assert.doesNotThrow(
+    () => validateRemoteBindingConfig('localhost', undefined),
+    'Localhost binding must not require API key'
+  );
 
-    // Constant-time comparison verification
-    assert.strictEqual(constantTimeCompare('secret-token', 'secret-token'), true);
-    assert.strictEqual(constantTimeCompare('secret-token', 'wrong-token'), false);
-    assert.strictEqual(constantTimeCompare('secret-token', 'secret-token-longer'), false);
-    assert.strictEqual(constantTimeCompare('', 'secret-token'), false);
+  // Constant-time comparison verification
+  assert.strictEqual(constantTimeCompare('secret-token', 'secret-token'), true);
+  assert.strictEqual(constantTimeCompare('secret-token', 'wrong-token'), false);
+  assert.strictEqual(constantTimeCompare('secret-token', 'secret-token-longer'), false);
+  assert.strictEqual(constantTimeCompare('', 'secret-token'), false);
 
-    console.log('  ✔ Non-loopback binding strictly requires non-empty OPENCODE_ROUTER_API_KEY.');
-    console.log('  ✔ Constant-time comparison prevents timing side-channel attacks.\n');
-  }
+  console.log('  ✔ Non-loopback binding strictly requires non-empty OPENCODE_ROUTER_API_KEY.');
+  console.log('  ✔ Constant-time comparison prevents timing side-channel attacks.\n');
 
   // 7. Live Server Remote Access Authentication (Bearer Token Enforcement)
   console.log('▶ Security Test 7: Live Server Remote Authentication (Bearer Tokens & Endpoint Protection)');
@@ -281,7 +295,10 @@ export async function runSecurityTests() {
       else server.once('listening', () => resolve());
     });
 
-    const makeRemoteRequest = (options: http.RequestOptions, bodyData?: string): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> => {
+    const makeRemoteRequest = (
+      options: http.RequestOptions,
+      bodyData?: string
+    ): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> => {
       return new Promise((resolve, reject) => {
         const req = http.request({ port: TEST_REMOTE_PORT, host: '127.0.0.1', ...options }, (res) => {
           let body = '';
@@ -306,11 +323,14 @@ export async function runSecurityTests() {
     console.log('  ✔ Unauthenticated GET /api/status rejected with 401 and WWW-Authenticate.');
 
     // Subtest 7B: Unauthenticated POST request to /api/workflow/start returns 401 Unauthorized
-    const unauthPostRes = await makeRemoteRequest({
-      path: '/api/workflow/start',
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' }
-    }, JSON.stringify({}));
+    const unauthPostRes = await makeRemoteRequest(
+      {
+        path: '/api/workflow/start',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      },
+      JSON.stringify({})
+    );
     assert.strictEqual(unauthPostRes.statusCode, 401, 'Unauthenticated state-changing POST must return 401');
     console.log('  ✔ Unauthenticated POST /api/workflow/start rejected with 401.');
 
@@ -326,7 +346,7 @@ export async function runSecurityTests() {
     const invalidTokenRes = await makeRemoteRequest({
       path: '/api/status',
       method: 'GET',
-      headers: { 'Authorization': 'Bearer completely-invalid-token' }
+      headers: { Authorization: 'Bearer completely-invalid-token' }
     });
     assert.strictEqual(invalidTokenRes.statusCode, 401, 'Invalid Bearer token must return 401');
     const invalidJson = JSON.parse(invalidTokenRes.body);
@@ -340,7 +360,7 @@ export async function runSecurityTests() {
     const validRes = await makeRemoteRequest({
       path: '/api/status',
       method: 'GET',
-      headers: { 'Authorization': `Bearer ${TEST_KEY}` }
+      headers: { Authorization: `Bearer ${TEST_KEY}` }
     });
     assert.strictEqual(validRes.statusCode, 200, 'Valid Bearer token must return 200 OK');
     const validJson = JSON.parse(validRes.body);
@@ -352,11 +372,14 @@ export async function runSecurityTests() {
       path: '/api/status',
       method: 'OPTIONS',
       headers: {
-        'Origin': 'http://localhost:5173',
+        Origin: 'http://localhost:5173',
         'Access-Control-Request-Method': 'GET'
       }
     });
-    assert(optionsRes.statusCode === 200 || optionsRes.statusCode === 204, 'CORS OPTIONS preflight must not be blocked by auth');
+    assert(
+      optionsRes.statusCode === 200 || optionsRes.statusCode === 204,
+      'CORS OPTIONS preflight must not be blocked by auth'
+    );
     console.log('  ✔ CORS preflight OPTIONS request bypassed auth correctly.');
 
     // Clean up test server and restore env
@@ -368,7 +391,9 @@ export async function runSecurityTests() {
   }
 
   // 8. Sensitive File Permissions & Symlink Overwrite Guard
-  console.log('▶ Security Test 8: Sensitive File Permissions (0600), Directory Mode (0700), and Symlink Overwrite Guard');
+  console.log(
+    '▶ Security Test 8: Sensitive File Permissions (0600), Directory Mode (0700), and Symlink Overwrite Guard'
+  );
   {
     const tempDir = path.join(os.tmpdir(), `opencode-sec-test-${Date.now()}`);
     ensureSecureDirectory(tempDir);
@@ -425,7 +450,11 @@ export async function runSecurityTests() {
         /Refusing to write through symbolic link/,
         'Attempt to write through symlink must throw security error'
       );
-      assert.strictEqual(fs.readFileSync(targetFile, 'utf-8'), 'PROTECTED_SYSTEM_DATA', 'Target file must not be modified through symlink');
+      assert.strictEqual(
+        fs.readFileSync(targetFile, 'utf-8'),
+        'PROTECTED_SYSTEM_DATA',
+        'Target file must not be modified through symlink'
+      );
       console.log('  ✔ Symlink overwrite attack strictly blocked; target preserved.');
     }
 

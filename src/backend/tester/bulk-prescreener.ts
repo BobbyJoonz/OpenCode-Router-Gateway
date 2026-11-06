@@ -80,16 +80,8 @@ export class BulkPrescreener {
       throw new Error('A pre-screen run is already in progress');
     }
 
-    const concurrency = clamp(
-      opts.concurrency ?? parseInt(getSetting('prescreen_concurrency', '200'), 10),
-      1,
-      1000
-    );
-    const timeoutMs = clamp(
-      opts.timeoutMs ?? parseInt(getSetting('prescreen_timeout_ms', '1500'), 10),
-      100,
-      30000
-    );
+    const concurrency = clamp(opts.concurrency ?? parseInt(getSetting('prescreen_concurrency', '200'), 10), 1, 1000);
+    const timeoutMs = clamp(opts.timeoutMs ?? parseInt(getSetting('prescreen_timeout_ms', '1500'), 10), 100, 30000);
 
     const where: string[] = [];
     const params: any[] = [];

@@ -21,7 +21,8 @@ export class CandidateRanker {
    * Get sorted candidate configurations ready for testing
    */
   public static getRankedCandidates(limit: number = 30): RankedConfigRow[] {
-    const rows = db.prepare(`
+    const rows = db
+      .prepare(`
       SELECT
         id, protocol, address, port, remark, security, network, details_json,
         last_status, last_latency_ms, consecutive_failures, success_count
@@ -37,7 +38,8 @@ export class CandidateRanker {
         CASE WHEN last_latency_ms IS NOT NULL AND last_latency_ms > 0 THEN last_latency_ms ELSE 9999 END ASC,
         id ASC
       LIMIT ?
-    `).all(limit * 2) as any[];
+    `)
+      .all(limit * 2) as any[];
 
     // Calculate smart score
     const scored: RankedConfigRow[] = rows.map((r) => {

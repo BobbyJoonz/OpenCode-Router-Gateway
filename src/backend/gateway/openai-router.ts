@@ -1,10 +1,14 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import { type NextFunction, type Request, type Response, Router } from 'express';
 import { db, getSetting } from '../db/database';
-import { KeyManager, ApiKeyRow } from './key-manager';
-import { UpstreamClient } from './upstream-client';
-import { classifyHttp, classifyNetwork, openAiError } from './error-mapper';
+import { lifecycle } from '../lifecycle';
+import { egressRotations, gatewayRequests, tokensTotal, upstreamRateLimits } from '../observability/metrics';
+import { annotateContext } from '../observability/request-context';
+import { withSpan } from '../observability/tracing';
 import { VpnEngine } from '../vpn/vpn-engine';
 import { isRoutableEgressAddress } from './egress-filter';
+import { classifyHttp, classifyNetwork, openAiError } from './error-mapper';
+import { type ApiKeyRow, KeyManager } from './key-manager';
+import { UpstreamClient } from './upstream-client';
 
 interface GatewayRequest extends Request {
   apiKey?: ApiKeyRow;
@@ -28,7 +32,15 @@ function gatewayEnabled(): boolean {
 
 function authFailure(res: Response, reason: 'missing' | 'invalid' | 'disabled'): void {
   if (reason === 'missing') {
-    res.status(401).json(openAiError('Missing bearer token. Send "Authorization: Bearer sk-or-...".', 'invalid_request_error', 'missing_api_key'));
+    res
+      .status(401)
+      .json(
+        openAiError(
+          'Missing bearer token. Send "Authorization: Bearer sk-or-...".',
+          'invalid_request_error',
+          'missing_api_key'
+        )
+      );
     return;
   }
   // "unknown" and "disabled" deliberately return the same answer: any difference
@@ -125,6 +137,8 @@ async function rotateNode(): Promise<boolean> {
       if (ok) {
         db.prepare('UPDATE configs SET is_active = 0').run();
         db.prepare('UPDATE configs SET is_active = 1 WHERE id = ?').run(row.id);
+        egressRotations.inc();
+        annotateContext({ nodeId: row.id });
         console.log(`[Gateway] rotated egress to #${row.id} ${row.address}:${row.port}`);
       }
       return ok;
@@ -190,6 +204,10 @@ export function createGatewayRouter(): Router {
 
   // ---------------------------------------------------------------- health
   router.get('/health', (_req: Request, res: Response) => {
+    if (lifecycle.isShuttingDown()) {
+      res.status(503).json({ status: 'shutting_down', connected: false });
+      return;
+    }
     const vpn = VpnEngine.getInstance();
     // Unauthenticated endpoint: report liveness only, never the egress endpoint.
     res.json({
@@ -203,14 +221,24 @@ export function createGatewayRouter(): Router {
   // ---------------------------------------------------------------- auth
   const authMiddleware = (req: GatewayRequest, res: Response, next: NextFunction) => {
     if (!gatewayEnabled()) {
-      res.status(503).json(openAiError('The gateway is disabled. Set gateway_enabled=true in settings.', 'server_error', 'gateway_disabled'));
+      res
+        .status(503)
+        .json(
+          openAiError(
+            'The gateway is disabled. Set gateway_enabled=true in settings.',
+            'server_error',
+            'gateway_disabled'
+          )
+        );
       return;
     }
 
     const maxBody = parseInt(getSetting('gateway_max_body_bytes', '8388608'), 10);
     const declared = parseInt(String(req.headers['content-length'] || '0'), 10);
     if (Number.isFinite(declared) && declared > maxBody) {
-      res.status(413).json(openAiError(`Request body exceeds ${maxBody} bytes.`, 'invalid_request_error', 'request_too_large'));
+      res
+        .status(413)
+        .json(openAiError(`Request body exceeds ${maxBody} bytes.`, 'invalid_request_error', 'request_too_large'));
       return;
     }
 
@@ -223,7 +251,9 @@ export function createGatewayRouter(): Router {
     const limit = KeyManager.checkRateLimit(verified.key.id, verified.key.rpm_limit);
     if (!limit.ok) {
       res.setHeader('Retry-After', String(Math.ceil(limit.retryAfterMs / 1000)));
-      res.status(429).json(openAiError('Rate limit exceeded for this API key.', 'rate_limit_error', 'rate_limit_exceeded'));
+      res
+        .status(429)
+        .json(openAiError('Rate limit exceeded for this API key.', 'rate_limit_error', 'rate_limit_exceeded'));
       return;
     }
 
@@ -232,10 +262,15 @@ export function createGatewayRouter(): Router {
       // cannot all pass the check. Never reserve more than half the limit, or a
       // small quota would be permanently unusable.
       const configured = Math.max(0, parseInt(getSetting('gateway_quota_reserve_tokens', '2000'), 10));
-      const reserve = configured > 0 ? Math.min(configured, Math.max(1, Math.floor(verified.key.daily_token_limit / 2))) : 0;
+      const reserve =
+        configured > 0 ? Math.min(configured, Math.max(1, Math.floor(verified.key.daily_token_limit / 2))) : 0;
       const used = KeyManager.tokensUsedToday(verified.key.id) + KeyManager.pendingFor(verified.key.id);
       if (used + reserve > verified.key.daily_token_limit) {
-        res.status(429).json(openAiError('Daily token quota exhausted for this API key.', 'rate_limit_error', 'daily_quota_exceeded'));
+        res
+          .status(429)
+          .json(
+            openAiError('Daily token quota exhausted for this API key.', 'rate_limit_error', 'daily_quota_exceeded')
+          );
         return;
       }
       if (reserve > 0) {
@@ -245,6 +280,7 @@ export function createGatewayRouter(): Router {
     }
 
     req.apiKey = verified.key;
+    annotateContext({ keyId: verified.key.id });
     next();
   };
 
@@ -319,7 +355,9 @@ export function createGatewayRouter(): Router {
       return;
     }
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
-      res.status(400).json(openAiError('"messages" must be a non-empty array.', 'invalid_request_error', 'invalid_messages'));
+      res
+        .status(400)
+        .json(openAiError('"messages" must be a non-empty array.', 'invalid_request_error', 'invalid_messages'));
       return;
     }
     if (body.model !== undefined && typeof body.model !== 'string') {
@@ -338,27 +376,50 @@ export function createGatewayRouter(): Router {
       forwardBody = { ...body, stream_options: { include_usage: true, ...existing } };
     }
 
-    // Make sure an egress node is up before we spend the request.
-    const connected = await ensureConnection();
-    if (!connected) {
-      res.status(503).json(openAiError('No working egress node is available. Run a workflow or a pre-screen first.', 'server_error', 'no_egress_node'));
-      return;
+    // Make sure an egress node is up before we spend the request — unless the
+    // upstream is loopback (mock / co-located router), which bypasses the tunnel.
+    if (UpstreamClient.requiresEgress()) {
+      const connected = await ensureConnection();
+      if (!connected) {
+        res
+          .status(503)
+          .json(
+            openAiError(
+              'No working egress node is available. Run a workflow or a pre-screen first.',
+              'server_error',
+              'no_egress_node'
+            )
+          );
+        return;
+      }
     }
 
     const activeBefore = VpnEngine.getInstance().getActiveConfig();
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      let forwarded;
+      let forwarded: Awaited<ReturnType<typeof UpstreamClient.forward>>;
       try {
-        forwarded = await UpstreamClient.forward({
-          method: 'POST',
-          path: '/chat/completions',
-          httpProxyPort: proxyPorts().http,
-          body: forwardBody,
-          accept: wantsStream ? 'text/event-stream' : 'application/json'
-        });
+        const upstreamConfig = UpstreamClient.resolveConfig();
+        forwarded = await withSpan(
+          'upstream.chat_completions',
+          {
+            'http.request.method': 'POST',
+            'upstream.url': upstreamConfig.baseUrl,
+            'llm.model': String(body.model || upstreamConfig.model || ''),
+            'llm.stream': wantsStream
+          },
+          () =>
+            UpstreamClient.forward({
+              method: 'POST',
+              path: '/chat/completions',
+              httpProxyPort: proxyPorts().http,
+              body: forwardBody,
+              accept: wantsStream ? 'text/event-stream' : 'application/json'
+            })
+        );
       } catch (err: any) {
         const classification = classifyNetwork(err?.code);
+        gatewayRequests.inc({ outcome: 'network_error', stream: String(wantsStream) });
         if (classification.rotate && attempt < MAX_ATTEMPTS && (await rotateNode())) {
           continue;
         }
@@ -374,14 +435,24 @@ export function createGatewayRouter(): Router {
           egressNodeId: VpnEngine.getInstance().getActiveConfig()?.id ?? null,
           error: err?.code || 'upstream_network_error'
         });
-        res.status(502).json(openAiError(`Upstream request failed: ${err?.message || 'network error'}`, 'server_error', 'upstream_unreachable'));
+        res
+          .status(502)
+          .json(
+            openAiError(
+              `Upstream request failed: ${err?.message || 'network error'}`,
+              'server_error',
+              'upstream_unreachable'
+            )
+          );
         return;
       }
 
       const classification = classifyHttp(forwarded.statusCode, forwarded.headers['retry-after'] as any);
+      if (classification.class === 'rate_limit') upstreamRateLimits.inc();
 
       // ------------------------------------------------------ success
       if (classification.class === 'ok') {
+        gatewayRequests.inc({ outcome: 'success', stream: String(wantsStream) });
         if (wantsStream) {
           await pipeStream(req, res, forwarded, key, body, startedAt);
         } else {
@@ -404,6 +475,7 @@ export function createGatewayRouter(): Router {
       // ------------------------------------------------------ pass through
       const text = await UpstreamClient.readAll(forwarded.body).catch(() => '');
       forwarded.cleanup();
+      gatewayRequests.inc({ outcome: classification.class, stream: String(wantsStream) });
 
       KeyManager.recordUsage({
         keyId: key.id,
@@ -523,7 +595,9 @@ async function pipeStream(
   } catch (err: any) {
     if (!clientClosed && !res.writableEnded) {
       try {
-        res.write(`data: ${JSON.stringify(openAiError(`Stream interrupted: ${err?.message || 'upstream error'}`, 'server_error', 'stream_interrupted'))}\n\n`);
+        res.write(
+          `data: ${JSON.stringify(openAiError(`Stream interrupted: ${err?.message || 'upstream error'}`, 'server_error', 'stream_interrupted'))}\n\n`
+        );
       } catch {
         /* ignore */
       }
@@ -531,6 +605,15 @@ async function pipeStream(
     }
   } finally {
     forwarded.cleanup();
+    // If the client vanished mid-stream, the response object may still hold the
+    // socket open. Closing it here is what lets the server actually shut down.
+    if (!res.writableEnded) {
+      try {
+        res.end();
+      } catch {
+        /* already gone */
+      }
+    }
     const usage = scanner.usage;
     KeyManager.recordUsage({
       keyId: key.id,

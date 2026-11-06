@@ -1,6 +1,6 @@
-import { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
+import type { NextFunction, Request, Response } from 'express';
 
 export const DEFAULT_BIND_HOST = '127.0.0.1';
 
@@ -45,21 +45,14 @@ export function resolveBindHost(
   requestedHost?: string,
   allowRemote: boolean = false
 ): { host: string; isRemoteAllowed: boolean; warning?: string } {
-  const candidate = (
-    requestedHost ||
-    process.env.HOST ||
-    process.env.OPENCODE_ROUTER_HOST ||
-    DEFAULT_BIND_HOST
-  ).trim();
+  const candidate = (requestedHost || process.env.HOST || process.env.OPENCODE_ROUTER_HOST || DEFAULT_BIND_HOST).trim();
 
   if (isLoopbackHost(candidate)) {
     return { host: candidate, isRemoteAllowed: false };
   }
 
   const remoteExplicitlyAllowed =
-    allowRemote ||
-    process.env.ALLOW_REMOTE_ACCESS === 'true' ||
-    process.env.OPENCODE_ROUTER_ALLOW_REMOTE === 'true';
+    allowRemote || process.env.ALLOW_REMOTE_ACCESS === 'true' || process.env.OPENCODE_ROUTER_ALLOW_REMOTE === 'true';
 
   if (!remoteExplicitlyAllowed) {
     const warning = `[SECURITY WARNING] Non-loopback bind host '${candidate}' requested without explicit opt-in (ALLOW_REMOTE_ACCESS=true). Defaulting to secure loopback address ${DEFAULT_BIND_HOST}.`;
@@ -74,16 +67,13 @@ export function resolveBindHost(
  * Validate that non-loopback binding is protected by an API key.
  * Throws SecurityConfigurationError if remote binding is requested without OPENCODE_ROUTER_API_KEY.
  */
-export function validateRemoteBindingConfig(
-  bindHost: string,
-  apiKey?: string
-): void {
+export function validateRemoteBindingConfig(bindHost: string, apiKey?: string): void {
   if (!isLoopbackHost(bindHost)) {
     const trimmedKey = (apiKey || process.env.OPENCODE_ROUTER_API_KEY || '').trim();
     if (!trimmedKey) {
       throw new SecurityConfigurationError(
         `[CRITICAL SECURITY ERROR] Binding to non-loopback host '${bindHost}' is prohibited without an API key. ` +
-        `You MUST configure OPENCODE_ROUTER_API_KEY with a secure non-empty secret before enabling remote access.`
+          `You MUST configure OPENCODE_ROUTER_API_KEY with a secure non-empty secret before enabling remote access.`
       );
     }
   }
@@ -141,7 +131,11 @@ export function isAllowedOrigin(origin: string | undefined, allowedOrigins: Set<
 /**
  * Check if the Host header matches an authorized local host (DNS Rebinding protection)
  */
-export function isAllowedHost(hostHeader: string | undefined, port: number, bindHost: string = DEFAULT_BIND_HOST): boolean {
+export function isAllowedHost(
+  hostHeader: string | undefined,
+  port: number,
+  bindHost: string = DEFAULT_BIND_HOST
+): boolean {
   if (!hostHeader) return true; // Direct non-HTTP/CLI sockets without Host header
 
   // Split hostname and port (handling IPv6 like [::1]:3000)
@@ -282,11 +276,7 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
       return next();
     }
 
-    const currentApiKey = (
-      options.apiKey ??
-      process.env.OPENCODE_ROUTER_API_KEY ??
-      ''
-    ).trim();
+    const currentApiKey = (options.apiKey ?? process.env.OPENCODE_ROUTER_API_KEY ?? '').trim();
 
     const envHost = (process.env.HOST || process.env.OPENCODE_ROUTER_HOST || '').trim();
     const isEnvHostRemote = envHost ? !isLoopbackHost(envHost) : false;
@@ -295,16 +285,15 @@ export function createAuthMiddleware(options: AuthMiddlewareOptions = {}) {
     const isRemoteActive =
       options.isRemote !== undefined
         ? options.isRemote
-        : (isBoundRemote ||
-           process.env.ALLOW_REMOTE_ACCESS === 'true' ||
-           process.env.OPENCODE_ROUTER_ALLOW_REMOTE === 'true' ||
-           isEnvHostRemote);
+        : isBoundRemote ||
+          process.env.ALLOW_REMOTE_ACCESS === 'true' ||
+          process.env.OPENCODE_ROUTER_ALLOW_REMOTE === 'true' ||
+          isEnvHostRemote;
 
     const enforceLocal =
       options.enforceLocal !== undefined
         ? options.enforceLocal
-        : (process.env.ENFORCE_LOCAL_AUTH === 'true' ||
-           process.env.OPENCODE_ROUTER_REQUIRE_LOCAL_AUTH === 'true');
+        : process.env.ENFORCE_LOCAL_AUTH === 'true' || process.env.OPENCODE_ROUTER_REQUIRE_LOCAL_AUTH === 'true';
 
     // If neither remote access nor explicit local auth enforcement is active, loopback is frictionless
     if (!isRemoteActive && !enforceLocal) {
@@ -367,23 +356,11 @@ export function maskAddress(addr?: string): string {
   return trimmed;
 }
 
-const SENSITIVE_QUERY_NAMES = [
-  'token',
-  'key',
-  'secret',
-  'password',
-  'auth',
-  'pass',
-  'api_key',
-  'access_token'
-];
+const SENSITIVE_QUERY_NAMES = ['token', 'key', 'secret', 'password', 'auth', 'pass', 'api_key', 'access_token'];
 
-const SENSITIVE_PARAM_REGEX = new RegExp(
-  `([?&])(${SENSITIVE_QUERY_NAMES.join('|')})=([^&#\\s]*)`,
-  'gi'
-);
+const SENSITIVE_PARAM_REGEX = new RegExp(`([?&])(${SENSITIVE_QUERY_NAMES.join('|')})=([^&#\\s]*)`, 'gi');
 
-const USERINFO_REGEX = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:\/@\s]+)(?::([^@\s]*))?(@)/g;
+const USERINFO_REGEX = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:/@\s]+)(?::([^@\s]*))?(@)/g;
 
 /**
  * Redact sensitive query parameter values (tokens, keys, passwords) and userinfo credentials.

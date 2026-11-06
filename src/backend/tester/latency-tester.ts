@@ -1,6 +1,6 @@
-import net from 'net';
 import http from 'http';
 import https from 'https';
+import net from 'net';
 import tls from 'tls';
 
 export interface TcpTestResult {
@@ -86,7 +86,7 @@ export class LatencyTester {
       const res = await fetch('https://api.ipify.org?format=json', { signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
-        const json = await res.json() as { ip: string };
+        const json = (await res.json()) as { ip: string };
         if (json.ip) {
           // Privacy protection: mask host IP to avoid exposing personal network details
           if (json.ip.includes('.')) {
@@ -121,16 +121,18 @@ export class LatencyTester {
         method: 'GET',
         path: `http://${targetHost}:${targetPort}${targetPath}`,
         headers: {
-          'Host': targetHost,
+          Host: targetHost,
           'User-Agent': 'OpenCode-Vpn-Probe/1.0',
-          'Connection': 'close'
+          Connection: 'close'
         },
         timeout: timeoutMs
       });
 
       req.on('response', (res) => {
         let body = '';
-        res.on('data', (chunk) => { body += chunk; });
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
         res.on('end', () => {
           if (resolved) return;
           resolved = true;

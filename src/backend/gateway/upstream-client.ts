@@ -1,4 +1,4 @@
-import { Agent, ProxyAgent, request, Dispatcher } from 'undici';
+import { Agent, type Dispatcher, ProxyAgent, request } from 'undici';
 import { getSetting } from '../db/database';
 
 export interface UpstreamConfig {
@@ -41,10 +41,7 @@ export class UpstreamClient {
     return {
       baseUrl: (process.env.GATEWAY_UPSTREAM_BASE_URL || getSetting('gateway_upstream_base_url', '')).trim(),
       apiKey: (process.env.GATEWAY_UPSTREAM_API_KEY || '').trim(),
-      timeoutMs: Math.max(
-        1,
-        parseInt(getSetting('gateway_upstream_timeout_seconds', '120'), 10)
-      ) * 1000,
+      timeoutMs: Math.max(1, parseInt(getSetting('gateway_upstream_timeout_seconds', '120'), 10)) * 1000,
       model: (process.env.GATEWAY_UPSTREAM_MODEL || getSetting('gateway_upstream_model', '')).trim()
     };
   }
@@ -93,8 +90,7 @@ export class UpstreamClient {
     try {
       const parsed = new URL(url);
       const bypass =
-        getSetting('gateway_upstream_bypass_proxy_loopback', 'true') === 'true' &&
-        this.isLoopbackHost(parsed.hostname);
+        getSetting('gateway_upstream_bypass_proxy_loopback', 'true') === 'true' && this.isLoopbackHost(parsed.hostname);
       if (bypass) return this.directDispatcher();
     } catch {
       // fall through to the proxy
@@ -118,6 +114,23 @@ export class UpstreamClient {
       // ignore
     }
     this.directAgent = null;
+  }
+
+  /**
+   * True when upstream traffic actually needs the rotating Xray egress.
+   * A loopback upstream (mock, or 9Router on the same host) does not.
+   */
+  public static requiresEgress(): boolean {
+    const config = this.resolveConfig();
+    if (!config.baseUrl) return false;
+    try {
+      const parsed = new URL(config.baseUrl);
+      const bypass =
+        getSetting('gateway_upstream_bypass_proxy_loopback', 'true') === 'true' && this.isLoopbackHost(parsed.hostname);
+      return !bypass;
+    } catch {
+      return true;
+    }
   }
 
   public static async forward(opts: ForwardOptions): Promise<ForwardResult> {
@@ -168,7 +181,9 @@ export class UpstreamClient {
       clearTimeout(timer);
       const aborted = err?.name === 'AbortError' || err?.code === 'UND_ERR_ABORTED';
       const wrapped: any = new Error(
-        aborted ? `Upstream request timed out after ${Math.round(timeoutMs / 1000)}s` : err?.message || 'Upstream request failed'
+        aborted
+          ? `Upstream request timed out after ${Math.round(timeoutMs / 1000)}s`
+          : err?.message || 'Upstream request failed'
       );
       wrapped.code = aborted ? 'UPSTREAM_TIMEOUT' : err?.code || 'UPSTREAM_NETWORK_ERROR';
       wrapped.cause = err;
@@ -184,7 +199,9 @@ export class UpstreamClient {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += buf.length;
       if (total > maxBytes) {
-        throw Object.assign(new Error('Upstream response exceeded the size cap'), { code: 'UPSTREAM_RESPONSE_TOO_LARGE' });
+        throw Object.assign(new Error('Upstream response exceeded the size cap'), {
+          code: 'UPSTREAM_RESPONSE_TOO_LARGE'
+        });
       }
       chunks.push(buf);
     }

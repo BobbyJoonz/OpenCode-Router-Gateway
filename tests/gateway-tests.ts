@@ -91,7 +91,9 @@ function startMockUpstream(): Promise<http.Server> {
       }
       if (model === 'mock-429') {
         response.writeHead(429, { 'content-type': 'application/json', 'retry-after': '1' });
-        response.end(JSON.stringify({ error: { message: 'rate limited', type: 'rate_limit_error', code: 'rate_limit' } }));
+        response.end(
+          JSON.stringify({ error: { message: 'rate limited', type: 'rate_limit_error', code: 'rate_limit' } })
+        );
         return;
       }
       if (model === 'mock-500') {
@@ -107,7 +109,12 @@ function startMockUpstream(): Promise<http.Server> {
         chunk({ id: 'mock', object: 'chat.completion.chunk', choices: [{ delta: { content: 'lo' } }] });
         const finish = () => {
           chunk({ id: 'mock', object: 'chat.completion.chunk', choices: [{ delta: {}, finish_reason: 'stop' }] });
-          chunk({ id: 'mock', object: 'chat.completion.chunk', choices: [], usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 } });
+          chunk({
+            id: 'mock',
+            object: 'chat.completion.chunk',
+            choices: [],
+            usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 }
+          });
           response.write('data: [DONE]\n\n');
           response.end();
         };
@@ -119,23 +126,29 @@ function startMockUpstream(): Promise<http.Server> {
       if (model === 'mock-slow') {
         setTimeout(() => {
           response.writeHead(200, { 'content-type': 'application/json' });
-          response.end(JSON.stringify({
-            id: 'mock', object: 'chat.completion', model,
-            choices: [{ index: 0, message: { role: 'assistant', content: 'slow ok' }, finish_reason: 'stop' }],
-            usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 }
-          }));
+          response.end(
+            JSON.stringify({
+              id: 'mock',
+              object: 'chat.completion',
+              model,
+              choices: [{ index: 0, message: { role: 'assistant', content: 'slow ok' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 }
+            })
+          );
         }, 3000);
         return;
       }
 
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({
-        id: 'chatcmpl-mock',
-        object: 'chat.completion',
-        model,
-        choices: [{ index: 0, message: { role: 'assistant', content: 'Hello from mock' }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }
-      }));
+      response.end(
+        JSON.stringify({
+          id: 'chatcmpl-mock',
+          object: 'chat.completion',
+          model,
+          choices: [{ index: 0, message: { role: 'assistant', content: 'Hello from mock' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }
+        })
+      );
     });
   });
 
@@ -183,7 +196,10 @@ async function main(): Promise<void> {
   const slowKey = await req('/api/keys', { method: 'POST', body: { name: 'it-rpm', rpmLimit: 1 } });
   const RPM_KEY = slowKey.json?.key as string;
 
-  const quotaKey = await req('/api/keys', { method: 'POST', body: { name: 'it-quota', rpmLimit: 500, dailyTokenLimit: 5 } });
+  const quotaKey = await req('/api/keys', {
+    method: 'POST',
+    body: { name: 'it-quota', rpmLimit: 500, dailyTokenLimit: 5 }
+  });
   const QUOTA_KEY = quotaKey.json?.key as string;
 
   const toggleKey = await req('/api/keys', { method: 'POST', body: { name: 'it-toggle', rpmLimit: 500 } });
@@ -192,11 +208,18 @@ async function main(): Promise<void> {
 
   // ------------------------------------------------------------------ auth
   section('Authentication');
-  const noAuth = await req('/v1/chat/completions', { method: 'POST', body: { model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] } });
+  const noAuth = await req('/v1/chat/completions', {
+    method: 'POST',
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] }
+  });
   check('missing token -> 401', noAuth.status === 401, `status ${noAuth.status}`);
   check('missing token error code', noAuth.json?.error?.code === 'missing_api_key', JSON.stringify(noAuth.json?.error));
 
-  const badAuth = await req('/v1/chat/completions', { method: 'POST', token: 'sk-or-not-a-real-key', body: { model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] } });
+  const badAuth = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: 'sk-or-not-a-real-key',
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] }
+  });
   check('invalid token -> 401', badAuth.status === 401, `status ${badAuth.status}`);
   check('invalid token error code', badAuth.json?.error?.code === 'invalid_api_key');
 
@@ -204,7 +227,11 @@ async function main(): Promise<void> {
   check('non-bearer scheme -> 401', wrongScheme.status === 401, `status ${wrongScheme.status}`);
 
   await req(`/api/keys/${TOGGLE_ID}`, { method: 'PATCH', body: { enabled: false } });
-  const disabled = await req('/v1/chat/completions', { method: 'POST', token: TOGGLE_KEY, body: { model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] } });
+  const disabled = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: TOGGLE_KEY,
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] }
+  });
   check('disabled key -> 401 (no key enumeration)', disabled.status === 401, `status ${disabled.status}`);
   await req(`/api/keys/${TOGGLE_ID}`, { method: 'PATCH', body: { enabled: true } });
 
@@ -213,13 +240,25 @@ async function main(): Promise<void> {
   const noMessages = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-ok' } });
   check('missing messages -> 400', noMessages.status === 400, `status ${noMessages.status}`);
 
-  const badMessages = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-ok', messages: 'nope' } });
+  const badMessages = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-ok', messages: 'nope' }
+  });
   check('messages not array -> 400', badMessages.status === 400, `status ${badMessages.status}`);
 
-  const emptyMessages = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-ok', messages: [] } });
+  const emptyMessages = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-ok', messages: [] }
+  });
   check('empty messages -> 400', emptyMessages.status === 400, `status ${emptyMessages.status}`);
 
-  const badModel = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 42, messages: [{ role: 'user', content: 'x' }] } });
+  const badModel = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 42, messages: [{ role: 'user', content: 'x' }] }
+  });
   check('non-string model -> 400', badModel.status === 400, `status ${badModel.status}`);
 
   await req('/api/settings', { method: 'PUT', body: { gateway_max_body_bytes: '600' } });
@@ -235,8 +274,15 @@ async function main(): Promise<void> {
   section('Model listing');
   const models = await req('/v1/models', { token: KEY });
   check('models endpoint 200', models.status === 200, `status ${models.status}`);
-  check('models list proxied from upstream', Array.isArray(models.json?.data), JSON.stringify(models.json).slice(0, 120));
-  check('models contains the mock model', (models.json?.data || []).some((m: any) => m.id === 'mock-ok'));
+  check(
+    'models list proxied from upstream',
+    Array.isArray(models.json?.data),
+    JSON.stringify(models.json).slice(0, 120)
+  );
+  check(
+    'models contains the mock model',
+    (models.json?.data || []).some((m: any) => m.id === 'mock-ok')
+  );
 
   section('Non-streaming completion');
   const ok = await req('/v1/chat/completions', {
@@ -263,38 +309,74 @@ async function main(): Promise<void> {
 
   // ----------------------------------------------------------------- errors
   section('Upstream error mapping');
-  const e401 = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-401', messages: [{ role: 'user', content: 'x' }] } });
+  const e401 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-401', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('401 passes through unchanged', e401.status === 401, `status ${e401.status}`);
   check('401 body preserved', e401.json?.error?.code === 'invalid_api_key');
 
-  const e400 = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-400', messages: [{ role: 'user', content: 'x' }] } });
+  const e400 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-400', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('400 passes through unchanged', e400.status === 400, `status ${e400.status}`);
 
-  const e500 = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-500', messages: [{ role: 'user', content: 'x' }] } });
+  const e500 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-500', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('500 passes through when rotation disabled', e500.status === 500, `status ${e500.status}`);
 
-  const e429 = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-429', messages: [{ role: 'user', content: 'x' }] } });
+  const e429 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-429', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('429 passes through when rotation disabled', e429.status === 429, `status ${e429.status}`);
 
   section('Upstream timeout');
   await req('/api/settings', { method: 'PUT', body: { gateway_upstream_timeout_seconds: '1' } });
-  const slow = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-slow', messages: [{ role: 'user', content: 'x' }] } });
+  const slow = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-slow', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('slow upstream -> 502', slow.status === 502, `status ${slow.status}`);
   check('timeout error code', slow.json?.error?.code === 'upstream_unreachable', JSON.stringify(slow.json?.error));
   await req('/api/settings', { method: 'PUT', body: { gateway_upstream_timeout_seconds: '15' } });
 
   // ------------------------------------------------------------- rate limit
   section('Rate limiting');
-  const r1 = await req('/v1/chat/completions', { method: 'POST', token: RPM_KEY, body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] } });
-  const r2 = await req('/v1/chat/completions', { method: 'POST', token: RPM_KEY, body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] } });
+  const r1 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: RPM_KEY,
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] }
+  });
+  const r2 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: RPM_KEY,
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('first request allowed', r1.status === 200, `status ${r1.status}`);
   check('second request rate limited', r2.status === 429, `status ${r2.status}`);
   check('Retry-After present', !!r2.headers.get('retry-after'));
 
   // ------------------------------------------------------------ daily quota
   section('Daily token quota');
-  const q1 = await req('/v1/chat/completions', { method: 'POST', token: QUOTA_KEY, body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] } });
-  const q2 = await req('/v1/chat/completions', { method: 'POST', token: QUOTA_KEY, body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] } });
+  const q1 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: QUOTA_KEY,
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] }
+  });
+  const q2 = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: QUOTA_KEY,
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'x' }] }
+  });
   check('quota key first call allowed', q1.status === 200, `status ${q1.status}`);
   check('quota exceeded -> 429', q2.status === 429, `status ${q2.status}`);
   check('quota error code', q2.json?.error?.code === 'daily_quota_exceeded', JSON.stringify(q2.json?.error));
@@ -319,12 +401,19 @@ async function main(): Promise<void> {
   setTimeout(() => controller.abort(), 400);
   await abortPromise;
   await new Promise((r) => setTimeout(r, 600));
-  const afterAbort = await req('/v1/chat/completions', { method: 'POST', token: KEY, body: { model: 'mock-ok', messages: [{ role: 'user', content: 'after abort' }] } });
+  const afterAbort = await req('/v1/chat/completions', {
+    method: 'POST',
+    token: KEY,
+    body: { model: 'mock-ok', messages: [{ role: 'user', content: 'after abort' }] }
+  });
   check('server survives client abort', afterAbort.status === 200, `status ${afterAbort.status}`);
 
   // --------------------------------------------------------------- prescreen
   section('Bulk pre-screen');
-  const prescreen = await req('/api/configs/prescreen', { method: 'POST', body: { limit: 60, concurrency: 30, timeoutMs: 800 } });
+  const prescreen = await req('/api/configs/prescreen', {
+    method: 'POST',
+    body: { limit: 60, concurrency: 30, timeoutMs: 800 }
+  });
   check('prescreen accepted', prescreen.status === 200, `status ${prescreen.status}`);
 
   const duplicate = await req('/api/configs/prescreen', { method: 'POST', body: { limit: 10 } });
@@ -334,7 +423,10 @@ async function main(): Promise<void> {
   for (let i = 0; i < 60; i++) {
     await new Promise((r) => setTimeout(r, 500));
     const status = await req('/api/prescreen/status');
-    if (status.json?.progress?.running === false && (status.json?.runs?.[0]?.status === 'done' || status.json?.runs?.[0]?.status === 'aborted')) {
+    if (
+      status.json?.progress?.running === false &&
+      (status.json?.runs?.[0]?.status === 'done' || status.json?.runs?.[0]?.status === 'aborted')
+    ) {
       prescreenDone = true;
       break;
     }
@@ -359,7 +451,11 @@ async function main(): Promise<void> {
   check('monitor status exposed', typeof healthStatus.json?.monitor?.enabled === 'boolean');
 
   const checkNow = await req('/api/health/check-now', { method: 'POST', body: { batch: 1 } });
-  check('health check-now runs (or refuses concurrent)', checkNow.status === 200 || checkNow.status === 409, `status ${checkNow.status}`);
+  check(
+    'health check-now runs (or refuses concurrent)',
+    checkNow.status === 200 || checkNow.status === 409,
+    `status ${checkNow.status}`
+  );
 
   // ------------------------------------------------------------ egress path
   section('Egress path (proof that traffic really goes through Xray)');
@@ -371,7 +467,7 @@ async function main(): Promise<void> {
   });
   check(
     'loopback upstream is unreachable when forced through the proxy',
-    forcedThroughProxy.status === 502,
+    forcedThroughProxy.status === 502 || forcedThroughProxy.status === 503,
     `status ${forcedThroughProxy.status}`
   );
 

@@ -49,15 +49,22 @@ export class ConfigParser {
     }
 
     const search = Object.fromEntries(u.searchParams);
-    const security = (search.security === 'reality' ? 'reality' : (search.security === 'tls' ? 'tls' : 'none')) as 'tls' | 'reality' | 'none';
-    
+    const security = (search.security === 'reality' ? 'reality' : search.security === 'tls' ? 'tls' : 'none') as
+      | 'tls'
+      | 'reality'
+      | 'none';
+
     // Xray-core strictly prohibits unencrypted VLESS over public networks
     if (security === 'none') {
       return null;
     }
 
-    const network = (['ws', 'grpc', 'h2', 'tcp'].includes(search.type) ? search.type : 'tcp') as 'tcp' | 'ws' | 'grpc' | 'h2';
-    
+    const network = (['ws', 'grpc', 'h2', 'tcp'].includes(search.type) ? search.type : 'tcp') as
+      | 'tcp'
+      | 'ws'
+      | 'grpc'
+      | 'h2';
+
     let remark = u.hash ? decodeURIComponent(u.hash.replace(/^#/, '')) : `${address}:${port}`;
     remark = this.sanitizeRemark(remark);
 
@@ -194,7 +201,7 @@ export class ConfigParser {
     // or ss://base64(method:password@host:port)#remark
     const withoutPrefix = rawUrl.slice(5);
     const hashIndex = withoutPrefix.indexOf('#');
-    let encodedPart = hashIndex !== -1 ? withoutPrefix.slice(0, hashIndex) : withoutPrefix;
+    const encodedPart = hashIndex !== -1 ? withoutPrefix.slice(0, hashIndex) : withoutPrefix;
     const hashPart = hashIndex !== -1 ? withoutPrefix.slice(hashIndex + 1) : '';
 
     let remark = hashPart ? decodeURIComponent(hashPart) : '';

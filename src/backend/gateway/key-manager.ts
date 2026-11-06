@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from '../db/database';
+import { tokensTotal } from '../observability/metrics';
 
 export interface ApiKeyRow {
   id: number;
@@ -21,9 +22,7 @@ export interface CreatedKey {
   name: string;
 }
 
-export type VerifyResult =
-  | { ok: true; key: ApiKeyRow }
-  | { ok: false; reason: 'missing' | 'invalid' | 'disabled' };
+export type VerifyResult = { ok: true; key: ApiKeyRow } | { ok: false; reason: 'missing' | 'invalid' | 'disabled' };
 
 /**
  * API-key issuance and verification for the OpenAI-compatible gateway.
@@ -39,11 +38,7 @@ export class KeyManager {
     return crypto.createHash('sha256').update(secret, 'utf8').digest('hex');
   }
 
-  public static create(opts: {
-    name: string;
-    rpmLimit?: number;
-    dailyTokenLimit?: number;
-  }): CreatedKey {
+  public static create(opts: { name: string; rpmLimit?: number; dailyTokenLimit?: number }): CreatedKey {
     const name = (opts.name || '').trim();
     if (!name) throw new Error('name is required');
     if (name.length > 100) throw new Error('name is too long (max 100 chars)');
@@ -205,6 +200,10 @@ export class KeyManager {
                 last_used_at = datetime('now')
           WHERE id = ?`
       ).run(params.totalTokens, params.keyId);
+
+      tokensTotal.inc({ kind: 'prompt' }, params.promptTokens);
+      tokensTotal.inc({ kind: 'completion' }, params.completionTokens);
+      tokensTotal.inc({ kind: 'total' }, params.totalTokens);
     } catch (err: any) {
       console.error('[Gateway] failed to record usage:', err?.message || err);
     }

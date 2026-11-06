@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Rebuild native modules
+        run: npm rebuild better-sqlite3
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Architecture boundaries
+        run: npm run check:boundaries
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Build frontend
+        run: npm run build:frontend
+
+      - name: Unit tests
+        run: npm run test:unit
+
+      - name: Acceptance + security suites
+        run: npm test
+
+      - name: Gateway integration suite
+        run: npm run test:gateway:ci
+
+      - name: Lifecycle (graceful shutdown, no orphan)
+        run: npm run test:lifecycle
+
+      - name: Gateway without the OpenCode CLI
+        run: npm run test:no-opencode
+
+      - name: Load smoke (p95 + error budget)
+        run: node tools/load-run.mjs --connections 20 --duration 10 --p95-budget 3000 --error-budget 1
+
+      - name: Coverage
+        run: npm run coverage
+
+      - name: Upload coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - name: npm audit (high and above)
+        run: npm audit --audit-level=high

@@ -1,9 +1,9 @@
-import { spawn, execSync } from 'child_process';
-import path from 'path';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
-import { ErrorClassifier, ClassificationResult } from './error-classifier';
+import path from 'path';
 import { getSetting } from '../db/database';
+import { type ClassificationResult, ErrorClassifier } from './error-classifier';
 
 export interface OpenCodeInfo {
   installed: boolean;
@@ -46,7 +46,10 @@ export class OpenCodeService {
     try {
       const whichCmd = this.isWin ? 'where opencode' : 'which opencode';
       const out = execSync(whichCmd, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
-      const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const lines = out
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean);
       // On Windows prefer a real .exe over the .cmd/.ps1 shims (spawn can't run .cmd without a shell)
       const preferred = this.isWin ? lines.filter((l) => l.toLowerCase().endsWith('.exe')) : lines;
       candidates.push(...preferred, ...lines);
@@ -75,7 +78,11 @@ export class OpenCodeService {
 
     if (installed) {
       try {
-        version = execSync(`"${this.binaryPath}" --version`, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        version = execSync(`"${this.binaryPath}" --version`, {
+          encoding: 'utf-8',
+          timeout: 5000,
+          stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
       } catch {
         // ignore
       }
@@ -169,11 +176,11 @@ export all_proxy="socks5://127.0.0.1:\${SOCKS_PORT}"
 export ALL_PROXY="socks5://127.0.0.1:\${SOCKS_PORT}"
 
 OPENCODE_BIN="${this.binaryPath}"
-if [ ! -x "\$OPENCODE_BIN" ]; then
-  OPENCODE_BIN=\$(which opencode 2>/dev/null || echo "opencode")
+if [ ! -x "$OPENCODE_BIN" ]; then
+  OPENCODE_BIN=$(which opencode 2>/dev/null || echo "opencode")
 fi
 
-exec "\$OPENCODE_BIN" "\$@"
+exec "$OPENCODE_BIN" "$@"
 `;
   }
 

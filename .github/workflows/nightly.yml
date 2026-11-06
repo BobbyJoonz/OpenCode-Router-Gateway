@@ -1,0 +1,57 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  contract-live:
+    name: upstream contract (live)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - run: npm rebuild better-sqlite3
+
+      - name: Contract (fixture mode, always)
+        run: npm run test:contract
+
+      - name: Contract (live provider)
+        if: ${{ env.CONTRACT_BASE_URL != '' && env.CONTRACT_API_KEY != '' }}
+        env:
+          CONTRACT_BASE_URL: ${{ secrets.CONTRACT_BASE_URL }}
+          CONTRACT_API_KEY: ${{ secrets.CONTRACT_API_KEY }}
+          CONTRACT_MODEL: ${{ secrets.CONTRACT_MODEL }}
+        run: npm run test:contract:live
+
+      - name: Skip notice
+        if: ${{ env.CONTRACT_BASE_URL == '' || env.CONTRACT_API_KEY == '' }}
+        run: echo "::notice::CONTRACT_* secrets are not configured — live contract checks were skipped."
+
+  soak:
+    name: soak (30 min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+      - run: npm rebuild better-sqlite3
+
+      - name: Soak 30 minutes, 30 connections
+        run: node tools/soak.mjs --minutes 30 --connections 30 --cycle 30 --max-growth 5
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-result
+          path: load/last-soak-result.json
+          retention-days: 30

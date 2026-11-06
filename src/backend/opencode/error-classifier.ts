@@ -1,10 +1,4 @@
-export type ErrorCategory =
-  | 'SUCCESS'
-  | 'RATE_LIMIT'
-  | 'AUTH_ERROR'
-  | 'NETWORK_ERROR'
-  | 'CONFIG_ERROR'
-  | 'UNKNOWN';
+export type ErrorCategory = 'SUCCESS' | 'RATE_LIMIT' | 'AUTH_ERROR' | 'NETWORK_ERROR' | 'CONFIG_ERROR' | 'UNKNOWN';
 
 export interface ClassificationResult {
   category: ErrorCategory;
@@ -23,7 +17,7 @@ export class ErrorClassifier {
       (combined.includes('connection_ok') ||
         combined.includes('"type":"text"') ||
         combined.includes('step_finish') ||
-        combined.includes('session.created') && !combined.includes('error'))
+        (combined.includes('session.created') && !combined.includes('error')))
     ) {
       return {
         category: 'SUCCESS',
@@ -41,7 +35,8 @@ export class ErrorClassifier {
       combined.includes('quota exceeded') ||
       combined.includes('resource has been exhausted')
     ) {
-      const isFreeModelLimit = combined.includes('free usage limit reached') || combined.includes('free models work in opencode');
+      const isFreeModelLimit =
+        combined.includes('free usage limit reached') || combined.includes('free models work in opencode');
       return {
         category: 'RATE_LIMIT',
         isRecoverableBySwitchingVpn: isFreeModelLimit, // Free model limit is often IP-tied in OpenCode
@@ -59,7 +54,7 @@ export class ErrorClassifier {
       combined.includes('forbidden') ||
       combined.includes('invalid api key') ||
       combined.includes('authentication failed') ||
-      combined.includes('0 credentials') && combined.includes('auth error')
+      (combined.includes('0 credentials') && combined.includes('auth error'))
     ) {
       return {
         category: 'AUTH_ERROR',
@@ -90,7 +85,11 @@ export class ErrorClassifier {
     }
 
     // Configuration errors
-    if (combined.includes('model not found') || combined.includes('invalid config') || combined.includes('syntaxerror')) {
+    if (
+      combined.includes('model not found') ||
+      combined.includes('invalid config') ||
+      combined.includes('syntaxerror')
+    ) {
       return {
         category: 'CONFIG_ERROR',
         isRecoverableBySwitchingVpn: false,

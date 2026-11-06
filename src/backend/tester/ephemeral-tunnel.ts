@@ -1,11 +1,12 @@
-import { spawn, execSync, ChildProcess } from 'child_process';
+import { type ChildProcess, execSync, spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
-import crypto from 'crypto';
+import { safeWriteSensitiveFile } from '../security/file-guard';
+import { dataDir as resolveDataDir } from '../paths';
 import { XrayConfigBuilder } from '../vpn/xray-config-builder';
 import { LatencyTester } from './latency-tester';
-import { safeWriteSensitiveFile } from '../security/file-guard';
 
 export interface ProbeRow {
   id: number;
@@ -69,7 +70,7 @@ export class EphemeralTunnelTester {
     if (this.swept) return;
     this.swept = true;
     try {
-      const dataDir = path.resolve(__dirname, '../../../data');
+      const dataDir = resolveDataDir();
       if (!fs.existsSync(dataDir)) return;
       const now = Date.now();
       for (const name of fs.readdirSync(dataDir)) {
@@ -111,7 +112,7 @@ export class EphemeralTunnelTester {
     this.busy = true;
 
     const startedAt = Date.now();
-    const dataDir = path.resolve(__dirname, '../../../data');
+    const dataDir = resolveDataDir();
     const cfgPath = path.join(dataDir, `probe-${crypto.randomBytes(6).toString('hex')}.json`);
     let child: ChildProcess | null = null;
 

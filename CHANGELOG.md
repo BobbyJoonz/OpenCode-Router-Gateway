@@ -6,6 +6,91 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [2.1.0] — Hardening (Axis A)
+
+Production-hardening pass: CI, lifecycle, observability, contract tests, load/soak
+and enforced architecture boundaries. No behaviour change to the public API.
+
+### Added — CI/CD and quality gates
+
+- `.github/workflows/ci.yml`: matrix of ubuntu/windows/macos × Node 20/22 running
+  typecheck, Biome lint, format check, boundary check, unit tests, acceptance and
+  security suites, gateway integration, lifecycle, load smoke and coverage, plus
+  a separate `npm audit --audit-level=high` job.
+- `.github/workflows/nightly.yml`: live upstream contract checks (when
+  `CONTRACT_*` secrets exist) and a 30-minute soak with artifact upload.
+- Biome (lint + format) replaces ESLint/Prettier — typescript-eslint does not
+  support the TypeScript 7 toolchain used here.
+- c8 coverage with enforced thresholds: 80 % lines, 85 % functions, 80 %
+  statements, 70 % branches. Measured: **82.19 / 92.15 / 82.19 / 75.17**.
+
+### Added — graceful lifecycle
+
+- `src/backend/lifecycle.ts`: shutdown phases (reject → pre hooks → close listener
+  → drain → post hooks → WAL checkpoint → exit), signal handlers, bounded drain,
+  `uncaughtException`/`unhandledRejection` handling.
+- `POST /api/admin/shutdown` (management auth) with `drainDelayMs`, so the same
+  path is testable on Windows where SIGTERM cannot be emulated.
+- Requests arriving during drain receive `503 shutting_down`; SSE clients are
+  closed so they cannot block exit; the Xray child is force-terminated.
+
+### Added — observability
+
+- `src/backend/observability/logger.ts`: pino JSON logs with central redaction.
+- `src/backend/observability/request-context.ts`: AsyncLocalStorage request id,
+  `X-Request-Id` propagation, per-request log line with key/node/provider ids.
+- `src/backend/observability/metrics.ts`: Prometheus registry and `GET /metrics`
+  (request rate, latency histogram, in-flight, rotations, upstream 429s, tokens,
+  node health, background jobs).
+- `src/backend/observability/tracing.ts`: opt-in OTLP tracing via
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, lazy SDK import, `upstream.chat_completions`
+  spans.
+
+### Added — contract, load and soak
+
+- `tests/contract/upstream-contract.ts`: OpenAI-compatible schema validators with
+  fixture mode (always) and live-provider mode (nightly, secrets-gated).
+- `tools/load-run.mjs`: autocannon harness with p95 and error budgets; writes
+  `load/last-load-result.json`. Measured: 706 rps, p95 113 ms, p99 130 ms,
+  0 errors over 14 112 requests.
+- `tools/soak.mjs`: repeated load cycles sampling RSS from `/metrics`; fails when
+  growth exceeds the budget. Short run measured +2.33 % RSS over 43 323 requests.
+
+### Added — architecture boundaries
+
+- `tools/check-boundaries.ts`: zero-dependency import graph checker enforcing no
+  cycles and no forbidden layer edges (gateway must not import opencode/
+  orchestrator; observability must stay a leaf).
+- `OpenCodeService` is now lazy, so the gateway and `/api/status` work on a host
+  without the OpenCode CLI installed.
+
+### Added — test infrastructure
+
+- `DATA_DIR` support (`src/backend/paths.ts`), so tests and operators can relocate
+  SQLite, probe configs and the active Xray config.
+- 275 unit tests (`node:test`) across parser, Xray builder, JSON importer, error
+  classifier/mapper, egress filter, key manager, database/migrations, bulk
+  pre-screen, candidate ranker, health monitor, latency tester, security guards,
+  lifecycle, observability, engine failure paths and in-process gateway HTTP.
+- `tests/lifecycle-integration.ts`: 8 checks including a real no-orphan PID check.
+
+### Fixed
+
+- **Streaming response leak**: after a client aborted mid-stream the response
+  object never ended, keeping the socket open (server shutdown could hang for
+  minutes). The stream finally-block now ends the response.
+- **Synchronous spawn failure**: `spawn()` throwing (EFTYPE/EACCES on Windows)
+  made `VpnEngine.start()` reject instead of resolving `false`.
+- Engine selection no longer picks loopback addresses as egress nodes.
+- `test-scenarios` no longer leaves a `127.0.0.1` "working" node in the database.
+
+### Changed
+
+- `npm run verify` runs the whole chain; `test:all` replaced by it.
+- README restructured with testing/observability/lifecycle/boundary sections.
+
+---
+
 ## [2.0.0] — Gateway edition
 
 Turns the desktop node-finder into a server-side, OpenAI-compatible gateway.

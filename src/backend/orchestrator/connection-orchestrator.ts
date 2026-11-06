@@ -1,14 +1,23 @@
 import { EventEmitter } from 'events';
 import { db, getSetting } from '../db/database';
 import { ConfigFetcher } from '../discovery/config-fetcher';
-import { CandidateRanker, RankedConfigRow } from '../tester/candidate-ranker';
-import { VpnEngine } from '../vpn/vpn-engine';
-import { LatencyTester } from '../tester/latency-tester';
+import type { ClassificationResult } from '../opencode/error-classifier';
 import { OpenCodeService } from '../opencode/opencode-service';
-import { ClassificationResult } from '../opencode/error-classifier';
+import { CandidateRanker, RankedConfigRow } from '../tester/candidate-ranker';
+import { LatencyTester } from '../tester/latency-tester';
+import { VpnEngine } from '../vpn/vpn-engine';
 
 export interface WorkflowProgressEvent {
-  phase: 'idle' | 'discovering' | 'testing' | 'success' | 'rate_limited' | 'auth_error' | 'failed' | 'exhausted' | 'stopped';
+  phase:
+    | 'idle'
+    | 'discovering'
+    | 'testing'
+    | 'success'
+    | 'rate_limited'
+    | 'auth_error'
+    | 'failed'
+    | 'exhausted'
+    | 'stopped';
   message: string;
   candidate?: {
     id: number;
@@ -50,22 +59,31 @@ export class ConnectionOrchestrator extends EventEmitter {
 
   public getStatus() {
     const vpn = VpnEngine.getInstance();
-    const opencode = OpenCodeService.getInstance();
-    const counts = db.prepare(`
+    // The OpenCode CLI is optional for the gateway path: never let a missing
+    // binary break /api/status.
+    let opencodeInfo: any = { installed: false, binaryPath: '' };
+    try {
+      opencodeInfo = OpenCodeService.getInstance().getInfo();
+    } catch {
+      // CLI not installed / not executable
+    }
+    const counts = db
+      .prepare(`
       SELECT
         COUNT(*) as total,
         SUM(CASE WHEN last_status = 'working' THEN 1 ELSE 0 END) as working,
         SUM(CASE WHEN last_status = 'failed' THEN 1 ELSE 0 END) as failed,
         SUM(CASE WHEN last_status = 'untested' THEN 1 ELSE 0 END) as untested
       FROM configs
-    `).get() as any;
+    `)
+      .get() as any;
 
     return {
       phase: this.currentPhase,
       isRunning: this.isRunning,
       message: this.lastMessage,
       activeConnection: vpn.getActiveConfig(),
-      opencode: opencode.getInfo(),
+      opencode: opencodeInfo,
       stats: {
         totalConfigs: counts?.total || 0,
         workingCount: counts?.working || 0,
@@ -211,7 +229,11 @@ export class ConnectionOrchestrator extends EventEmitter {
           status: 'testing'
         });
 
-        const opencodeResult: ClassificationResult = await opencode.testOpenCodeConnection(httpPort, socksPort, opencodeTimeout);
+        const opencodeResult: ClassificationResult = await opencode.testOpenCodeConnection(
+          httpPort,
+          socksPort,
+          opencodeTimeout
+        );
 
         if (opencodeResult.category === 'SUCCESS') {
           // Success! Keep connection active and finish!
@@ -220,7 +242,9 @@ export class ConnectionOrchestrator extends EventEmitter {
           // NOTE: string literals must use single quotes — modern SQLite builds
           // (better-sqlite3 v12+) disable double-quoted string literals, so
           // last_status = "working" is parsed as a column reference and throws.
-          db.prepare(`UPDATE configs SET is_active = 1, success_count = success_count + 1, last_status = 'working', consecutive_failures = 0 WHERE id = ?`).run(candidate.id);
+          db.prepare(
+            `UPDATE configs SET is_active = 1, success_count = success_count + 1, last_status = 'working', consecutive_failures = 0 WHERE id = ?`
+          ).run(candidate.id);
 
           const activeInfo = vpn.getActiveConfig();
           if (activeInfo) {
@@ -254,8 +278,10 @@ export class ConnectionOrchestrator extends EventEmitter {
           } else {
             // Free model IP rate limit: rotate to next VPN endpoint
             await vpn.stop();
-            this.emitProgress('testing', `IP rate limit encountered. Switching to next VPN configuration to obtain fresh IP...`);
-            continue;
+            this.emitProgress(
+              'testing',
+              `IP rate limit encountered. Switching to next VPN configuration to obtain fresh IP...`
+            );
           }
         } else if (opencodeResult.category === 'AUTH_ERROR') {
           await vpn.stop();
@@ -266,7 +292,14 @@ export class ConnectionOrchestrator extends EventEmitter {
         } else {
           // Network or other error: rotate
           await vpn.stop();
-          this.recordCandidateResult(candidate.id, proxyTest.latencyMs, 1, 0, 'NETWORK_ERROR', opencodeResult.userMessage);
+          this.recordCandidateResult(
+            candidate.id,
+            proxyTest.latencyMs,
+            1,
+            0,
+            'NETWORK_ERROR',
+            opencodeResult.userMessage
+          );
           this.emitProgress('testing', `OpenCode network test failed through ${candidate.remark}. Rotating...`, {
             id: candidate.id,
             protocol: candidate.protocol,
@@ -278,7 +311,6 @@ export class ConnectionOrchestrator extends EventEmitter {
             status: 'failed',
             error: opencodeResult.userMessage
           });
-          continue;
         }
       }
 
@@ -304,7 +336,7 @@ export class ConnectionOrchestrator extends EventEmitter {
     errorMessage?: string
   ): void {
     const isWorking = opencodeSuccess === 1;
-    const status = isWorking ? 'working' : (errorCategory === 'RATE_LIMIT' ? 'rate_limited' : 'failed');
+    const status = isWorking ? 'working' : errorCategory === 'RATE_LIMIT' ? 'rate_limited' : 'failed';
 
     db.prepare(`
       UPDATE configs SET
@@ -318,7 +350,14 @@ export class ConnectionOrchestrator extends EventEmitter {
     db.prepare(`
       INSERT INTO test_history (config_id, latency_ms, proxy_success, opencode_success, error_category, error_message)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(configId, latencyMs > 0 ? latencyMs : null, proxySuccess, opencodeSuccess, errorCategory, errorMessage || null);
+    `).run(
+      configId,
+      latencyMs > 0 ? latencyMs : null,
+      proxySuccess,
+      opencodeSuccess,
+      errorCategory,
+      errorMessage || null
+    );
   }
 
   private emitProgress(

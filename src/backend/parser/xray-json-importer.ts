@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { ParsedConfig } from './config-parser';
+import type { ParsedConfig } from './config-parser';
 
 /**
  * Importer for FULL Xray/V2Ray client configuration documents (`config.json`).
@@ -150,15 +150,7 @@ export class XrayJsonImporter {
     const port = parseInt(server.port, 10);
     if (isNaN(port)) return null;
 
-    return this.build(
-      'ss',
-      address,
-      port,
-      'none',
-      'tcp',
-      { method: server.method, password: server.password },
-      ob.tag
-    );
+    return this.build('ss', address, port, 'none', 'tcp', { method: server.method, password: server.password }, ob.tag);
   }
 
   private static build(
@@ -170,9 +162,7 @@ export class XrayJsonImporter {
     details: Record<string, any>,
     tag?: string
   ): ParsedConfig {
-    const auth = String(
-      details.uuid || details.password || details.method || ''
-    );
+    const auth = String(details.uuid || details.password || details.method || '');
     const config_hash = crypto
       .createHash('sha256')
       .update(`${protocol}:${address.toLowerCase()}:${port}:${auth}`)

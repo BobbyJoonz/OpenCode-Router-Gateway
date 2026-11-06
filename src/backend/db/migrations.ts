@@ -73,9 +73,7 @@ export function runMigrations(db: Database.Database): void {
   `);
 
   // ---- additive columns on configs -------------------------------------
-  const cols = new Set(
-    (db.prepare('PRAGMA table_info(configs)').all() as Array<{ name: string }>).map((c) => c.name)
-  );
+  const cols = new Set((db.prepare('PRAGMA table_info(configs)').all() as Array<{ name: string }>).map((c) => c.name));
   const addColumn = (name: string, ddl: string) => {
     if (!cols.has(name)) {
       db.exec(`ALTER TABLE configs ADD COLUMN ${name} ${ddl}`);
@@ -122,5 +120,7 @@ export function runMigrations(db: Database.Database): void {
   }
 
   // Mark prescreen runs that were interrupted by a crash as aborted.
-  db.prepare(`UPDATE prescreen_runs SET status = 'aborted', finished_at = datetime('now') WHERE status = 'running'`).run();
+  db.prepare(
+    `UPDATE prescreen_runs SET status = 'aborted', finished_at = datetime('now') WHERE status = 'running'`
+  ).run();
 }

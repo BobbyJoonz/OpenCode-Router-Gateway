@@ -1,38 +1,51 @@
-import express, { Request, Response } from 'express';
-import path from 'path';
+import express, { type Request, type Response } from 'express';
 import fs from 'fs';
 import os from 'os';
-import { db, initDatabase, getSetting, setSetting } from './db/database';
-import { VpnEngine } from './vpn/vpn-engine';
+import path from 'path';
+import { db, getSetting, initDatabase, setSetting } from './db/database';
+import { ConfigFetcher } from './discovery/config-fetcher';
+import { KeyManager } from './gateway/key-manager';
+import { createGatewayRouter } from './gateway/openai-router';
+import { UpstreamClient } from './gateway/upstream-client';
+import { lifecycle } from './lifecycle';
+import { logger } from './observability/logger';
+import { metricsHandler, metricsMiddleware, refreshGauges } from './observability/metrics';
+import { requestContextMiddleware } from './observability/request-context';
+import { initTracing } from './observability/tracing';
 import { OpenCodeService } from './opencode/opencode-service';
 import { ConnectionOrchestrator } from './orchestrator/connection-orchestrator';
-import { ConfigFetcher } from './discovery/config-fetcher';
-import { LatencyTester } from './tester/latency-tester';
-import { BulkPrescreener } from './tester/bulk-prescreener';
-import { HealthMonitor } from './tester/health-monitor';
-import { KeyManager } from './gateway/key-manager';
-import { UpstreamClient } from './gateway/upstream-client';
-import { createGatewayRouter } from './gateway/openai-router';
-import { PrivilegeWizard } from './security/privilege-wizard';
 import {
+  createAuthMiddleware,
   createCorsMiddleware,
   createSecurityGuardMiddleware,
-  createAuthMiddleware,
-  resolveBindHost,
-  validateRemoteBindingConfig,
-  setActiveBindHost,
   DEFAULT_BIND_HOST,
   maskAddress,
-  sanitizeSubscriptionUrl
+  resolveBindHost,
+  sanitizeSubscriptionUrl,
+  setActiveBindHost,
+  validateRemoteBindingConfig
 } from './security/api-guard';
+import { PrivilegeWizard } from './security/privilege-wizard';
+import { BulkPrescreener } from './tester/bulk-prescreener';
+import { HealthMonitor } from './tester/health-monitor';
+import { LatencyTester } from './tester/latency-tester';
+import { VpnEngine } from './vpn/vpn-engine';
 
 export const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const { host: INITIAL_BIND_HOST, warning: hostWarning } = resolveBindHost();
 if (hostWarning) {
-  console.warn(hostWarning);
+  logger.warn({ event: 'bind_warning' }, hostWarning);
 }
 setActiveBindHost(INITIAL_BIND_HOST);
+
+// ---------------------------------------------------------------------------
+// Observability + lifecycle run first so every request (including rejected
+// ones) is counted, logged with a request id, and drained on shutdown.
+// ---------------------------------------------------------------------------
+app.use(requestContextMiddleware);
+app.use(metricsMiddleware);
+app.use(lifecycle.trackInFlight);
 
 // Security Hardening: Restricted CORS with development-only origin allowlist
 app.use(createCorsMiddleware(PORT, INITIAL_BIND_HOST));
@@ -62,13 +75,40 @@ initDatabase();
 
 const orchestrator = ConnectionOrchestrator.getInstance();
 const vpn = VpnEngine.getInstance();
-const opencode = OpenCodeService.getInstance();
+// Lazy on purpose: the gateway must start and serve without the OpenCode CLI installed.
+const getOpenCode = () => OpenCodeService.getInstance();
 
 // Background health monitor (no-op when disabled in settings).
 HealthMonitor.start();
 
 // Server-Sent Events (SSE) clients
 const sseClients: Set<Response> = new Set();
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown wiring.
+// `pre` hooks release long-lived connections that would otherwise block drain;
+// `post` hooks stop the engine and flush telemetry.
+// ---------------------------------------------------------------------------
+lifecycle.onShutdown(
+  'sse-clients',
+  () => {
+    for (const client of sseClients) {
+      try {
+        client.end();
+      } catch {
+        /* ignore */
+      }
+    }
+    sseClients.clear();
+  },
+  'pre'
+);
+lifecycle.onShutdown('prescreener', () => BulkPrescreener.requestAbort(), 'pre');
+lifecycle.onShutdown('health-monitor', () => HealthMonitor.stop(), 'pre');
+lifecycle.onShutdown('vpn-engine', async () => {
+  await vpn.stop();
+});
+lifecycle.onShutdown('upstream-agents', () => UpstreamClient.resetAgents());
 
 orchestrator.on('progress', (data) => {
   const payload = `data: ${JSON.stringify(data)}\n\n`;
@@ -91,12 +131,14 @@ app.get('/api/events', (req: Request, res: Response) => {
   sseClients.add(res);
 
   // Send initial state immediately
-  res.write(`data: ${JSON.stringify({
-    phase: orchestrator.getStatus().phase,
-    message: orchestrator.getStatus().message,
-    stats: orchestrator.getStatus().stats,
-    activeConnection: vpn.getActiveConfig()
-  })}\n\n`);
+  res.write(
+    `data: ${JSON.stringify({
+      phase: orchestrator.getStatus().phase,
+      message: orchestrator.getStatus().message,
+      stats: orchestrator.getStatus().stats,
+      activeConnection: vpn.getActiveConfig()
+    })}\n\n`
+  );
 
   req.on('close', () => {
     sseClients.delete(res);
@@ -153,7 +195,7 @@ app.post('/api/vpn/test-current', async (req: Request, res: Response) => {
   const socksPort = parseInt(getSetting('socks_port', '10808'), 10);
 
   const proxyTest = await LatencyTester.testProxyHttp(httpPort, 3000);
-  const opencodeTest = await opencode.testOpenCodeConnection(
+  const opencodeTest = await getOpenCode().testOpenCodeConnection(
     httpPort,
     socksPort,
     parseInt(getSetting('opencode_timeout_seconds', '18'), 10)
@@ -175,8 +217,8 @@ app.get('/api/configs', (req: Request, res: Response) => {
   const protocol = (req.query.protocol as string) || '';
   const search = (req.query.search as string) || '';
 
-  let whereClauses: string[] = [];
-  let params: any[] = [];
+  const whereClauses: string[] = [];
+  const params: any[] = [];
 
   if (status) {
     whereClauses.push('last_status = ?');
@@ -194,7 +236,8 @@ app.get('/api/configs', (req: Request, res: Response) => {
   const whereStr = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
   const total = (db.prepare(`SELECT COUNT(*) as count FROM configs ${whereStr}`).get(...params) as any)?.count || 0;
-  const items = db.prepare(`
+  const items = db
+    .prepare(`
     SELECT
       id, protocol, address, port, remark, security, network,
       last_tested_at, last_latency_ms, last_status, consecutive_failures, success_count, is_active,
@@ -204,7 +247,8 @@ app.get('/api/configs', (req: Request, res: Response) => {
     ${whereStr}
     ORDER BY is_active DESC, success_count DESC, id ASC
     LIMIT ? OFFSET ?
-  `).all(...params, limit, offset);
+  `)
+    .all(...params, limit, offset);
 
   res.json({
     items,
@@ -256,7 +300,7 @@ app.post('/api/configs/test-single', async (req: Request, res: Response) => {
     });
   }
 
-  const opencodeTest = await opencode.testOpenCodeConnection(
+  const opencodeTest = await getOpenCode().testOpenCodeConnection(
     httpPort,
     socksPort,
     parseInt(getSetting('opencode_timeout_seconds', '18'), 10)
@@ -362,7 +406,7 @@ app.delete('/api/sources/:id', (req: Request, res: Response) => {
 
 // Diagnostics
 app.get('/api/diagnostics', (req: Request, res: Response) => {
-  const opencodeInfo = { ...opencode.getInfo() };
+  const opencodeInfo = { ...getOpenCode().getInfo() };
   const userHome = os.homedir() || process.env.HOME || '';
   const sanitizePath = (p?: string): string => {
     if (!p) return '';
@@ -375,14 +419,16 @@ app.get('/api/diagnostics', (req: Request, res: Response) => {
   opencodeInfo.configPath = sanitizePath(opencodeInfo.configPath);
   const privilegeStatus = { ...PrivilegeWizard.checkStatus() };
   privilegeStatus.setupScriptPath = sanitizePath(privilegeStatus.setupScriptPath);
-  const launcherPath = sanitizePath(opencode.getLauncherPath());
-  const history = db.prepare(`
+  const launcherPath = sanitizePath(getOpenCode().getLauncherPath());
+  const history = db
+    .prepare(`
     SELECT h.*, c.remark, c.protocol, c.address, c.port
     FROM test_history h
     JOIN configs c ON h.config_id = c.id
     ORDER BY h.id DESC
     LIMIT 15
-  `).all() as any[];
+  `)
+    .all() as any[];
 
   const sanitizedHistory = history.map((item) => ({
     ...item,
@@ -402,7 +448,9 @@ app.get('/api/diagnostics', (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 app.post('/api/configs/prescreen', (req: Request, res: Response) => {
   if (BulkPrescreener.isRunning()) {
-    return res.status(409).json({ error: 'A pre-screen run is already in progress', progress: BulkPrescreener.getProgress() });
+    return res
+      .status(409)
+      .json({ error: 'A pre-screen run is already in progress', progress: BulkPrescreener.getProgress() });
   }
 
   const { concurrency, timeoutMs, onlyUnhealthy, limit, sourceId } = req.body || {};
@@ -464,7 +512,8 @@ app.get('/api/egress/groups', (req: Request, res: Response) => {
         ORDER BY live_nodes DESC, g.egress_ip ASC`
     )
     .all();
-  const distinct = (db.prepare('SELECT COUNT(DISTINCT egress_ip) AS n FROM configs WHERE egress_ip IS NOT NULL').get() as any)?.n || 0;
+  const distinct =
+    (db.prepare('SELECT COUNT(DISTINCT egress_ip) AS n FROM configs WHERE egress_ip IS NOT NULL').get() as any)?.n || 0;
   res.json({ distinct_egress_ips: distinct, groups });
 });
 
@@ -565,7 +614,10 @@ function redactSetting(key: string, value: string): string {
 }
 
 app.get('/api/settings', (req: Request, res: Response) => {
-  const rows = db.prepare('SELECT key, value FROM settings ORDER BY key').all() as Array<{ key: string; value: string }>;
+  const rows = db.prepare('SELECT key, value FROM settings ORDER BY key').all() as Array<{
+    key: string;
+    value: string;
+  }>;
   const settings: Record<string, string> = {};
   for (const row of rows) {
     if (!SETTING_WHITELIST.has(row.key)) continue;
@@ -617,6 +669,27 @@ app.put('/api/settings', (req: Request, res: Response) => {
   res.json({ success: true, applied, rejected });
 });
 
+// ---------------------------------------------------------------------------
+// Observability: Prometheus scrape endpoint (management auth applies)
+// ---------------------------------------------------------------------------
+app.get('/metrics', async (req: Request, res: Response) => {
+  refreshGauges();
+  await metricsHandler(req, res);
+});
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown trigger.
+// systemd delivers SIGTERM on Linux; this endpoint lets the same path be
+// exercised on Windows and in automated lifecycle tests.
+// ---------------------------------------------------------------------------
+app.post('/api/admin/shutdown', (req: Request, res: Response) => {
+  const drainDelayMs = Math.max(0, Math.min(parseInt(String(req.body?.drainDelayMs ?? 0), 10) || 0, 10000));
+  res.status(202).json({ success: true, message: 'Shutdown scheduled', drainDelayMs });
+  setTimeout(() => {
+    void lifecycle.shutdown({ reason: 'api', drainDelayMs, timeoutMs: 15000 });
+  }, 25);
+});
+
 // Serve static frontend files if built
 const frontendDist = path.resolve(__dirname, '../frontend/dist');
 if (fs.existsSync(frontendDist)) {
@@ -629,15 +702,24 @@ if (fs.existsSync(frontendDist)) {
 export function startServer(port: number = PORT, host?: string) {
   const { host: bindHost, warning } = resolveBindHost(host);
   if (warning) {
-    console.warn(warning);
+    logger.warn({ event: 'bind_warning' }, warning);
   }
   // Validate that remote binding is protected by an API key
   validateRemoteBindingConfig(bindHost, process.env.OPENCODE_ROUTER_API_KEY);
   setActiveBindHost(bindHost);
 
-  return app.listen(port, bindHost, () => {
-    console.log(`[OpenCode Router] Backend server running on http://${bindHost}:${port}`);
+  // Tracing is opt-in (OTEL_EXPORTER_OTLP_ENDPOINT); never blocks startup.
+  void initTracing();
+
+  const server = app.listen(port, bindHost, () => {
+    logger.info({ event: 'server_started', bindHost, port }, `backend listening on http://${bindHost}:${port}`);
   });
+
+  lifecycle.install(server, {
+    timeoutMs: Math.max(1000, parseInt(process.env.SHUTDOWN_TIMEOUT_MS || '15000', 10))
+  });
+
+  return server;
 }
 
 if (require.main === module) {

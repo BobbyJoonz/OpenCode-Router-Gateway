@@ -1,10 +1,11 @@
-import { spawn, execSync, ChildProcess } from 'child_process';
-import path from 'path';
+import { type ChildProcess, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import net from 'net';
+import path from 'path';
 import { db, getSetting } from '../db/database';
+import { ensureSecureDirectory, safeWriteSensitiveFile } from '../security/file-guard';
+import { dataDir as resolveDataDir } from '../paths';
 import { XrayConfigBuilder } from './xray-config-builder';
-import { safeWriteSensitiveFile, ensureSecureDirectory } from '../security/file-guard';
 
 export interface ActiveConfigInfo {
   id: number;
@@ -43,7 +44,10 @@ export class VpnEngine {
           path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Xray', 'xray.exe')
         ];
         for (const c of candidates) {
-          if (c && fs.existsSync(c)) { this.binPath = c; break; }
+          if (c && fs.existsSync(c)) {
+            this.binPath = c;
+            break;
+          }
         }
       } else if (fs.existsSync('/usr/local/bin/xray')) {
         this.binPath = '/usr/local/bin/xray';
@@ -52,7 +56,7 @@ export class VpnEngine {
       }
     }
 
-    const dataDir = path.join(projectRoot, 'data');
+    const dataDir = resolveDataDir();
     ensureSecureDirectory(dataDir);
     this.configFilePath = path.join(dataDir, 'active-xray-config.json');
     this.stateFilePath = path.join(dataDir, 'active-connection.json');
@@ -114,16 +118,20 @@ export class VpnEngine {
   /**
    * Start proxy with given configuration
    */
-  public async start(configRow: {
-    id: number;
-    protocol: string;
-    address: string;
-    port: number;
-    remark: string;
-    security: string;
-    network: string;
-    details_json: string;
-  }, socksPort: number = 10808, httpPort: number = 10809): Promise<boolean> {
+  public async start(
+    configRow: {
+      id: number;
+      protocol: string;
+      address: string;
+      port: number;
+      remark: string;
+      security: string;
+      network: string;
+      details_json: string;
+    },
+    socksPort: number = 10808,
+    httpPort: number = 10809
+  ): Promise<boolean> {
     await this.stop();
 
     // Guard: a stale/foreign listener on the loopback ports makes xray exit with
@@ -132,7 +140,7 @@ export class VpnEngine {
     if (!(await this.waitForPortsFree(socksPort, httpPort, 2500))) {
       console.error(
         `[VPN Engine] Loopback ports ${socksPort}/${httpPort} are still in use by another process ` +
-        `(e.g. v2rayN). Change the ports in settings or stop that program.`
+          `(e.g. v2rayN). Change the ports in settings or stop that program.`
       );
       return false;
     }
@@ -171,10 +179,25 @@ export class VpnEngine {
     } catch {}
 
     return new Promise<boolean>((resolve) => {
-      const child = spawn(this.binPath, ['run', '-c', this.configFilePath], {
-        stdio: ['ignore', logFd, logFd],
-        detached: true
-      });
+      let child: ChildProcess;
+      try {
+        child = spawn(this.binPath, ['run', '-c', this.configFilePath], {
+          stdio: ['ignore', logFd, logFd],
+          detached: true
+        });
+      } catch (err: any) {
+        // spawn() can throw synchronously (EACCES/EFTYPE on Windows); callers
+        // expect a boolean, never a rejection.
+        console.error('[VPN Engine] Spawn threw:', err?.message || err);
+        try {
+          fs.closeSync(logFd);
+        } catch {
+          /* ignore */
+        }
+        this.cleanupState();
+        resolve(false);
+        return;
+      }
       child.unref();
 
       this.childProcess = child;
@@ -198,7 +221,9 @@ export class VpnEngine {
       child.on('error', (err) => {
         console.error('[VPN Engine] Spawn error:', err.message);
         hasExited = true;
-        try { fs.closeSync(logFd); } catch {}
+        try {
+          fs.closeSync(logFd);
+        } catch {}
         this.cleanupState();
         resolve(false);
       });
@@ -206,7 +231,9 @@ export class VpnEngine {
       child.on('exit', (code, signal) => {
         hasExited = true;
         this.childProcess = null;
-        try { fs.closeSync(logFd); } catch {}
+        try {
+          fs.closeSync(logFd);
+        } catch {}
         this.cleanupState();
       });
 
@@ -350,7 +377,8 @@ export class VpnEngine {
     return false;
   }
 
-  private async probePort(host: string, port: number, timeoutMs: number): Promise<boolean> {    return new Promise((resolve) => {
+  private async probePort(host: string, port: number, timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
       const socket = new net.Socket();
       socket.setTimeout(timeoutMs);
 

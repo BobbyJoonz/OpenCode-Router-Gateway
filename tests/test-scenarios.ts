@@ -1,17 +1,17 @@
 import assert from 'assert';
-import path from 'path';
 import fs from 'fs';
 import http from 'http';
 import net from 'net';
-import { db, initDatabase, getSetting, setSetting } from '../src/backend/db/database';
-import { ConfigParser } from '../src/backend/parser/config-parser';
-import { XrayConfigBuilder } from '../src/backend/vpn/xray-config-builder';
-import { VpnEngine } from '../src/backend/vpn/vpn-engine';
-import { LatencyTester } from '../src/backend/tester/latency-tester';
+import path from 'path';
+import { db, getSetting, initDatabase, setSetting } from '../src/backend/db/database';
+import { ConfigFetcher } from '../src/backend/discovery/config-fetcher';
 import { ErrorClassifier } from '../src/backend/opencode/error-classifier';
 import { OpenCodeService } from '../src/backend/opencode/opencode-service';
+import { ConfigParser } from '../src/backend/parser/config-parser';
 import { CandidateRanker } from '../src/backend/tester/candidate-ranker';
-import { ConfigFetcher } from '../src/backend/discovery/config-fetcher';
+import { LatencyTester } from '../src/backend/tester/latency-tester';
+import { VpnEngine } from '../src/backend/vpn/vpn-engine';
+import { XrayConfigBuilder } from '../src/backend/vpn/xray-config-builder';
 import { runSecurityTests } from './security-tests';
 
 async function runTestSuite() {
@@ -25,7 +25,8 @@ async function runTestSuite() {
   console.log('▶ Test 1: Parser and Validator Verification');
   {
     // VLESS
-    const vlessUrl = 'vless://d342d11e-d224-4463-b982-532309285094@192.0.2.1:443?security=tls&type=ws&path=%2F&host=ccc.xyz&sni=ccc.xyz&fp=chrome#US_Node';
+    const vlessUrl =
+      'vless://d342d11e-d224-4463-b982-532309285094@192.0.2.1:443?security=tls&type=ws&path=%2F&host=ccc.xyz&sni=ccc.xyz&fp=chrome#US_Node';
     const vlessParsed = ConfigParser.parse(vlessUrl);
     assert(vlessParsed !== null, 'VLESS should parse correctly');
     assert.strictEqual(vlessParsed?.protocol, 'vless');
@@ -132,7 +133,8 @@ async function runTestSuite() {
   console.log('▶ Test 4: Scenario C - OpenCode Network Failure Classification');
   {
     const stdout = '';
-    const stderr = 'level=ERROR message="stream error" error="AI_RetryError: Failed to fetch after 3 attempts. FetchError: connect ECONNREFUSED 127.0.0.1:4096"';
+    const stderr =
+      'level=ERROR message="stream error" error="AI_RetryError: Failed to fetch after 3 attempts. FetchError: connect ECONNREFUSED 127.0.0.1:4096"';
     const classification = ErrorClassifier.classify(1, stdout, stderr);
     assert.strictEqual(classification.category, 'NETWORK_ERROR');
     assert.strictEqual(classification.isRecoverableBySwitchingVpn, true);
@@ -143,13 +145,15 @@ async function runTestSuite() {
   console.log('▶ Test 5: Scenario D - Provider Rate Limit Classification');
   {
     // Case 1: OpenCode Free tier limit (tied to IP)
-    const ipLimitStderr = 'level=ERROR message="stream error" error="AI_RetryError: Failed after 3 attempts. Last error: Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going"';
+    const ipLimitStderr =
+      'level=ERROR message="stream error" error="AI_RetryError: Failed after 3 attempts. Last error: Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going"';
     const c1 = ErrorClassifier.classify(1, '', ipLimitStderr);
     assert.strictEqual(c1.category, 'RATE_LIMIT');
     assert.strictEqual(c1.isRecoverableBySwitchingVpn, true, 'Free tier IP rate limit is recoverable via fresh VPN IP');
 
     // Case 2: Account-level HTTP 429 quota
-    const account429Stderr = 'level=ERROR error="HTTP 429: You have exceeded your current quota, please check your plan and billing details."';
+    const account429Stderr =
+      'level=ERROR error="HTTP 429: You have exceeded your current quota, please check your plan and billing details."';
     const c2 = ErrorClassifier.classify(1, '', account429Stderr);
     assert.strictEqual(c2.category, 'RATE_LIMIT');
     assert.strictEqual(c2.isRecoverableBySwitchingVpn, false, 'Account level rate limit should stop rotation');
@@ -159,10 +163,15 @@ async function runTestSuite() {
   // Test 6: Scenario E - Authentication Failure
   console.log('▶ Test 6: Scenario E - Authentication Failure Classification');
   {
-    const authStderr = 'level=ERROR error="HTTP 401 Unauthorized: Invalid API key or missing credentials in ~/.local/share/opencode/auth.json"';
+    const authStderr =
+      'level=ERROR error="HTTP 401 Unauthorized: Invalid API key or missing credentials in ~/.local/share/opencode/auth.json"';
     const classification = ErrorClassifier.classify(1, '', authStderr);
     assert.strictEqual(classification.category, 'AUTH_ERROR');
-    assert.strictEqual(classification.isRecoverableBySwitchingVpn, false, 'Auth errors must NOT trigger endless VPN switching');
+    assert.strictEqual(
+      classification.isRecoverableBySwitchingVpn,
+      false,
+      'Auth errors must NOT trigger endless VPN switching'
+    );
     console.log('  ✔ Authentication error correctly halts rotation without blaming network.\n');
   }
 
@@ -179,7 +188,10 @@ async function runTestSuite() {
     // is present, so the launcher must expose ONLY the SOCKS5 endpoint (ALL_PROXY).
     if (process.platform === 'win32') {
       assert(/set "ALL_PROXY=socks5:\/\//.test(launcherContent), 'Windows launcher sets ALL_PROXY (SOCKS5)');
-      assert(/set "http_proxy="/.test(launcherContent), 'Windows launcher clears http_proxy (breaks OpenCode LLM runtime)');
+      assert(
+        /set "http_proxy="/.test(launcherContent),
+        'Windows launcher clears http_proxy (breaks OpenCode LLM runtime)'
+      );
       assert(launcherContent.includes('"%OPENCODE_BIN%" %*'), 'Windows launcher invokes opencode');
     } else {
       assert(launcherContent.includes('export all_proxy='), 'Launcher sets all_proxy specifically');
@@ -227,7 +239,11 @@ async function runTestSuite() {
     const candidates = CandidateRanker.getRankedCandidates(10);
     const topCandidate = candidates[0];
     assert(topCandidate !== undefined, 'Top candidate should exist');
-    assert.strictEqual(topCandidate.last_status, 'working', 'Previously successful candidate ranked highest on repeat run');
+    assert.strictEqual(
+      topCandidate.last_status,
+      'working',
+      'Previously successful candidate ranked highest on repeat run'
+    );
 
     // Cleanup: never leave test artefacts in the production database. A loopback
     // "working" row used to be picked up by the gateway and could poison rotation.

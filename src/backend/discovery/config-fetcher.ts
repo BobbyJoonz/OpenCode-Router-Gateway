@@ -1,5 +1,5 @@
 import { db } from '../db/database';
-import { ConfigParser, ParsedConfig } from '../parser/config-parser';
+import { ConfigParser, type ParsedConfig } from '../parser/config-parser';
 import { XrayJsonImporter } from '../parser/xray-json-importer';
 import { sanitizeSubscriptionUrl } from '../security/api-guard';
 
@@ -69,8 +69,9 @@ export class ConfigFetcher {
       const resp = await fetch(source.url, {
         signal: controller.signal,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/plain, text/html, application/octet-stream, */*'
+          'User-Agent':
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          Accept: 'text/plain, text/html, application/octet-stream, */*'
         }
       });
       clearTimeout(timeoutId);
@@ -175,7 +176,10 @@ export class ConfigFetcher {
   /**
    * Import custom raw text or single URLs directly
    */
-  public static importRawText(rawText: string, customName: string = 'Manual Import'): { imported: number; duplicates: number; invalid: number } {
+  public static importRawText(
+    rawText: string,
+    customName: string = 'Manual Import'
+  ): { imported: number; duplicates: number; invalid: number } {
     let content = rawText.trim();
     if (!content.includes('://') && content.length > 30) {
       try {

@@ -2,8 +2,8 @@
 REM Dedicated OpenCode VPN Launcher (Windows)
 REM Injects the active local proxy specifically for OpenCode without system-wide routing changes.
 
-if "%OPENCODE_HTTP_PROXY_PORT%"=="" set "OPENCODE_HTTP_PROXY_PORT=11809"
-if "%OPENCODE_SOCKS_PROXY_PORT%"=="" set "OPENCODE_SOCKS_PROXY_PORT=11808"
+if "%OPENCODE_HTTP_PROXY_PORT%"=="" set "OPENCODE_HTTP_PROXY_PORT=10809"
+if "%OPENCODE_SOCKS_PROXY_PORT%"=="" set "OPENCODE_SOCKS_PROXY_PORT=10808"
 
 REM OpenCode's LLM runtime breaks on HTTP(S) proxy env vars (ECONNREFUSED).
 REM SOCKS5 via ALL_PROXY works for the model catalog and the completion stream.
