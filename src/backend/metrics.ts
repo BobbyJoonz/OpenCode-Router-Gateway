@@ -61,6 +61,7 @@ export class Metrics {
     retentionDeletedTotal: number;
     rotations: number;
     failovers: number;
+    providers: Array<{ name: string; used: number; limit: number; total: number }>;
   }): string {
     const lines: string[] = [];
     const help = (name: string, type: string, text: string) => {
@@ -122,6 +123,16 @@ export class Metrics {
 
     help('opencode_router_retention_deleted_total', 'counter', 'Rows removed by the retention service.');
     lines.push(`opencode_router_retention_deleted_total ${gauges.retentionDeletedTotal}`);
+
+    help('opencode_router_provider_tpm_used', 'gauge', 'Tokens sent to a provider in the current minute.');
+    help('opencode_router_provider_tpm_limit', 'gauge', 'Configured TPM ceiling for a provider (0 = unlimited).');
+    help('opencode_router_provider_tokens_total', 'counter', 'Tokens sent to a provider since start.');
+    for (const provider of gauges.providers) {
+      const name = this.esc(provider.name);
+      lines.push(`opencode_router_provider_tpm_used{provider="${name}"} ${provider.used}`);
+      lines.push(`opencode_router_provider_tpm_limit{provider="${name}"} ${provider.limit}`);
+      lines.push(`opencode_router_provider_tokens_total{provider="${name}"} ${provider.total}`);
+    }
 
     return lines.join('\n') + '\n';
   }

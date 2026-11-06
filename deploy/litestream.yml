@@ -1,0 +1,17 @@
+# Litestream — continuous WAL replication for the gateway database.
+#
+#   docker compose -f deploy/docker-compose.yml --profile ha up -d
+#
+# Required env: LITESTREAM_BUCKET, LITESTREAM_REGION (or LITESTREAM_ENDPOINT),
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY.
+dbs:
+  - path: /app/data/opencode-vpn.db
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: opencode-router
+        region: ${LITESTREAM_REGION:-us-east-1}
+        endpoint: ${LITESTREAM_ENDPOINT:-}
+        sync-interval: 1s
+        retention: 72h
+        snapshot-interval: 24h

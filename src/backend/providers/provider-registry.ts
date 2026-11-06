@@ -11,6 +11,8 @@ export interface ProviderRow {
   cost_per_1m_in: number;
   cost_per_1m_out: number;
   rpm_limit: number;
+  /** Tokens per minute ceiling for this provider account. 0 = unlimited. */
+  tpm_limit: number;
   daily_usd_cap: number;
   enabled: number;
   created_at: string;
@@ -26,6 +28,7 @@ export interface ProviderInput {
   cost_per_1m_in?: number;
   cost_per_1m_out?: number;
   rpm_limit?: number;
+  tpm_limit?: number;
   daily_usd_cap?: number;
   enabled?: boolean;
 }
@@ -64,8 +67,8 @@ export class ProviderRegistry {
     const info = db
       .prepare(
         `INSERT INTO providers
-           (name, kind, base_url, key_env, model, priority, cost_per_1m_in, cost_per_1m_out, rpm_limit, daily_usd_cap, enabled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           (name, kind, base_url, key_env, model, priority, cost_per_1m_in, cost_per_1m_out, rpm_limit, tpm_limit, daily_usd_cap, enabled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         name,
@@ -77,6 +80,7 @@ export class ProviderRegistry {
         Math.max(0, Number(input.cost_per_1m_in) || 0),
         Math.max(0, Number(input.cost_per_1m_out) || 0),
         Math.max(0, Math.trunc(Number(input.rpm_limit) || 0)),
+        Math.max(0, Math.trunc(Number(input.tpm_limit) || 0)),
         Math.max(0, Number(input.daily_usd_cap) || 0),
         input.enabled === false ? 0 : 1
       );
@@ -98,6 +102,7 @@ export class ProviderRegistry {
       cost_per_1m_in: patch.cost_per_1m_in ?? current.cost_per_1m_in,
       cost_per_1m_out: patch.cost_per_1m_out ?? current.cost_per_1m_out,
       rpm_limit: patch.rpm_limit ?? current.rpm_limit,
+      tpm_limit: patch.tpm_limit ?? current.tpm_limit,
       daily_usd_cap: patch.daily_usd_cap ?? current.daily_usd_cap,
       enabled: patch.enabled === undefined ? current.enabled : patch.enabled ? 1 : 0
     };
@@ -107,7 +112,7 @@ export class ProviderRegistry {
     db.prepare(
       `UPDATE providers
           SET name = ?, kind = ?, base_url = ?, key_env = ?, model = ?, priority = ?,
-              cost_per_1m_in = ?, cost_per_1m_out = ?, rpm_limit = ?, daily_usd_cap = ?, enabled = ?
+              cost_per_1m_in = ?, cost_per_1m_out = ?, rpm_limit = ?, tpm_limit = ?, daily_usd_cap = ?, enabled = ?
         WHERE id = ?`
     ).run(
       next.name,
@@ -119,6 +124,7 @@ export class ProviderRegistry {
       next.cost_per_1m_in,
       next.cost_per_1m_out,
       next.rpm_limit,
+      next.tpm_limit,
       next.daily_usd_cap,
       next.enabled,
       id
@@ -159,6 +165,7 @@ export class ProviderRegistry {
       cost_per_1m_in: 0,
       cost_per_1m_out: 0,
       rpm_limit: 0,
+      tpm_limit: 0,
       daily_usd_cap: 0,
       enabled: key ? 1 : 0,
       created_at: new Date().toISOString()

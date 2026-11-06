@@ -44,3 +44,23 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # HA-lite: continuous WAL replication (opt-in):  --profile ha
+  # See docs/HA.md for the failover runbook.
+  # ---------------------------------------------------------------------------
+  litestream:
+    image: litestream/litestream:0.3
+    container_name: orgw-litestream
+    profiles: ["ha"]
+    restart: unless-stopped
+    command: replicate -config /etc/litestream.yml
+    volumes:
+      - ../data:/app/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+    environment:
+      LITESTREAM_BUCKET: ${LITESTREAM_BUCKET:-}
+      LITESTREAM_REGION: ${LITESTREAM_REGION:-us-east-1}
+      LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}

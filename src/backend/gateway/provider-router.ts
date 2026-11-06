@@ -1,6 +1,7 @@
 import { getSetting } from '../db/database';
 import { ProviderRegistry, ProviderRow } from '../providers/provider-registry';
 import { ProviderSelector } from '../providers/provider-selector';
+import { TpmTracker } from '../providers/tpm-tracker';
 import { Readable } from 'stream';
 import { ForwardOptions, ForwardResult, UpstreamClient } from './upstream-client';
 import { classifyUpstream, UpstreamErrorInfo } from './upstream-errors';
@@ -54,6 +55,7 @@ export class ProviderRouter {
           cost_per_1m_in: 0,
           cost_per_1m_out: 0,
           rpm_limit: 0,
+          tpm_limit: 0,
           daily_usd_cap: 0,
           enabled: 1,
           created_at: new Date().toISOString()
@@ -74,22 +76,53 @@ export class ProviderRouter {
     let lastError: any = null;
     const pinnedOrder = selection?.providerIds && selection.providerIds.length > 0 ? selection.providerIds : null;
 
+    // Pre-flight token estimate drives TPM admission: a provider whose per-minute
+    // budget cannot fit this request is skipped, so several accounts add up to an
+    // aggregate TPM larger than any single one.
+    const estimatedTokens = TpmTracker.estimateFromBody(opts.body);
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let provider: ProviderRow | null;
 
       if (pinnedOrder) {
         // Model-routed request: only the providers that actually host this model,
-        // in the operator-defined order.
+        // in the operator-defined order, and only if their TPM budget allows it.
         const allowed = new Set(pinnedOrder);
-        const pool = this.available().filter((p) => allowed.has(p.id) && !tried.includes(p.id));
+        const pool = this.available().filter(
+          (p) =>
+            allowed.has(p.id) &&
+            !tried.includes(p.id) &&
+            TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit)
+        );
         pool.sort((a, b) => pinnedOrder.indexOf(a.id) - pinnedOrder.indexOf(b.id));
         provider = pool[0] || null;
       } else {
-        const candidates = ProviderSelector.candidates(tried);
-        provider = candidates[0] || this.available().find((p) => !tried.includes(p.id)) || null;
+        const candidates = ProviderSelector.candidates(tried, estimatedTokens);
+        // Fall back to `available()` (env / settings upstream) so a deployment with
+        // no providers table row still works — but only if its TPM budget allows.
+        provider =
+          candidates[0] ||
+          this.available().find(
+            (p) => !tried.includes(p.id) && TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit)
+          ) ||
+          null;
       }
 
-      if (!provider) break;
+      if (!provider) {
+        // Distinguish "no providers at all" from "all providers are at their TPM
+        // ceiling" — the caller answers 429 + Retry-After for the latter.
+        const untried = this.available().filter((p) => !tried.includes(p.id));
+        const tpmBlocked = untried.filter(
+          (p) => p.tpm_limit > 0 && !TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit)
+        );
+        if (tpmBlocked.length > 0 && tpmBlocked.length === untried.length) {
+          throw Object.assign(new Error('All providers are at their token-per-minute limit'), {
+            code: 'PROVIDER_TPM_EXHAUSTED',
+            retryAfterMs: 60_000
+          });
+        }
+        break;
+      }
       tried.push(provider.id);
 
       // Apply the per-provider model name when the request was model-routed.

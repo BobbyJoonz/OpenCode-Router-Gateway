@@ -122,7 +122,10 @@ export class EgressPool {
     }
 
     this.size = configured;
-    const base = Math.max(1024, parseInt(getSetting('pool_base_port', '12000'), 10));
+    // Cluster workers must not fight over the same loopback ports: each worker
+    // gets a 100-port slice (16 slots x 2 ports fits comfortably).
+    const workerIndex = Math.max(0, parseInt(process.env.WORKER_INDEX || '0', 10) || 0);
+    const base = Math.max(1024, parseInt(getSetting('pool_base_port', '12000'), 10)) + workerIndex * 100;
     const bin = this.resolveBinary();
     this.slots = Array.from({ length: configured }, (_, i) => {
       const slot = new XraySlot(i, base + i * 2, base + i * 2 + 1, bin, this.dataDir);

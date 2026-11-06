@@ -7,6 +7,8 @@ import { egressPool } from '../vpn/egress-pool';
 import { XraySlot } from '../vpn/xray-slot';
 import { ProviderRouter } from './provider-router';
 import { ModelRouter } from './model-router';
+import { mapReduce, shouldMapReduce } from './map-reduce';
+import { TpmTracker } from '../providers/tpm-tracker';
 import { ProviderRegistry, ProviderRow } from '../providers/provider-registry';
 import { FreshnessTracker } from '../tester/freshness';
 import { costOf, spendToday, spendThisMonth } from './cost';
@@ -410,6 +412,78 @@ export function createGatewayRouter(): Router {
         return;
       }
       selection = plan ? { providerIds: plan.providerIds, modelByProvider: plan.modelByProvider } : undefined;
+    }
+
+    // Map-reduce: opt-in handling for prompts larger than the model window.
+    // A gateway cannot widen a model's context, but it can summarise the input in
+    // chunks and answer from the notes. Streaming is never map-reduced.
+    const mapReduceEnabled = getSetting('gateway_mapreduce_enabled', 'false') === 'true';
+    const contextLimit = parseInt(getSetting('gateway_mapreduce_context_limit', '0'), 10) || 0;
+    if (mapReduceEnabled && shouldMapReduce(body, contextLimit, TpmTracker.estimateFromBody(body))) {
+      const slot = await egressPool.acquire(key.id, key.egress_policy || undefined);
+      if (!slot) {
+        res.status(503).json(openAiError('No working egress slot is available.', 'server_error', 'no_egress_node'));
+        return;
+      }
+      egressPool.track(slot);
+      try {
+        const result = await mapReduce({
+          body: forwardBody,
+          contextLimit,
+          chunkTokens: Math.max(1000, parseInt(getSetting('gateway_mapreduce_chunk_tokens', '30000'), 10)),
+          maxChunks: Math.max(1, Math.min(parseInt(getSetting('gateway_mapreduce_max_chunks', '16'), 10), 64)),
+          forwardJson: async (chunkBody: any) => {
+            const routed = await ProviderRouter.forward(
+              {
+                method: 'POST',
+                path: '/chat/completions',
+                httpProxyPort: slot.httpPort,
+                body: chunkBody,
+                accept: 'application/json'
+              },
+              selection
+            );
+            const text = await UpstreamClient.readAll(routed.forwarded.body);
+            routed.forwarded.cleanup();
+            return JSON.parse(text);
+          }
+        });
+
+        KeyManager.recordUsage({
+          keyId: key.id,
+          model: body.model || null,
+          promptTokens: result.usage.prompt_tokens,
+          completionTokens: result.usage.completion_tokens,
+          totalTokens: result.usage.total_tokens,
+          statusCode: 200,
+          latencyMs: Date.now() - startedAt,
+          upstream: UpstreamClient.resolveConfig().baseUrl,
+          egressNodeId: slot.node?.id ?? null
+        });
+
+        res.setHeader('x-opencode-mapreduce', '1');
+        res.setHeader('x-opencode-chunks', String(result.chunks));
+        res.json(result.final);
+        return;
+      } catch (err: any) {
+        if (err?.code === 'MAPREDUCE_TOO_LARGE') {
+          res.status(413).json(
+            openAiError(
+              `The input needs ${err?.chunks} chunks, above the configured limit. Split the request upstream.`,
+              'invalid_request_error',
+              'input_too_large_for_mapreduce'
+            )
+          );
+          return;
+        }
+        if (err?.code !== 'MAPREDUCE_NOT_APPLICABLE') {
+          res.status(502).json(openAiError(`Map-reduce failed: ${err?.message || 'upstream error'}`, 'server_error', 'mapreduce_failed'));
+          return;
+        }
+        // Not applicable: fall through to the normal single-call path.
+      } finally {
+        egressPool.release(slot);
+      }
     }
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {

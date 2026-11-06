@@ -1,5 +1,6 @@
 import { getSetting } from '../db/database';
 import { ProviderRegistry, ProviderRow } from './provider-registry';
+import { TpmTracker } from './tpm-tracker';
 
 interface Cooldown {
   failures: number;
@@ -30,16 +31,26 @@ export class ProviderSelector {
     return !!cooldown && cooldown.until > now;
   }
 
-  public static candidates(excludeIds: number[] = []): ProviderRow[] {
+  /**
+   * @param estimatedTokens pre-flight estimate for this request. Providers whose
+   *   TPM budget cannot fit it are removed, which is what lets several accounts
+   *   add up to an aggregate TPM larger than any single one.
+   */
+  public static candidates(excludeIds: number[] = [], estimatedTokens = 0): ProviderRow[] {
     const excluded = new Set(excludeIds);
     const all = ProviderRegistry.enabled().filter(
       (provider) => !excluded.has(provider.id) && ProviderRegistry.hasKey(provider)
     );
 
+    const withCapacity = all.filter((provider) =>
+      TpmTracker.canAccept(provider.id, estimatedTokens, provider.tpm_limit)
+    );
+    if (withCapacity.length === 0) return [];
+
     const now = Date.now();
-    const healthy = all.filter((provider) => !this.isCooling(provider.id, now));
+    const healthy = withCapacity.filter((provider) => !this.isCooling(provider.id, now));
     // If everything is cooling down we still have to try something.
-    const pool = healthy.length > 0 ? healthy : all;
+    const pool = healthy.length > 0 ? healthy : withCapacity;
 
     switch (this.policy()) {
       case 'cost':

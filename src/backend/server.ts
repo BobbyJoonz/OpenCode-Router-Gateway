@@ -15,6 +15,7 @@ import { Doctor } from './doctor';
 import { RetentionService } from './service/retention';
 import { Metrics } from './metrics';
 import { Notifier } from './service/notifier';
+import { TpmTracker } from './providers/tpm-tracker';
 import { ModelRouter } from './gateway/model-router';
 import { KeyManager } from './gateway/key-manager';
 import { UpstreamClient } from './gateway/upstream-client';
@@ -112,7 +113,12 @@ const isDirectRun = (() => {
   }
 })();
 
-if (isDirectRun) {
+/**
+ * Starts the background machinery (health monitor, retention, alerts, egress pool)
+ * and installs signal handlers. Exported so a cluster worker can run the same
+ * bootstrap without being the process entry point.
+ */
+export function bootstrap(): void {
   // Background health monitor (no-op when disabled in settings).
   HealthMonitor.start();
 
@@ -547,6 +553,9 @@ app.get('/metrics', (req: Request, res: Response) => {
   const pool = egressPool.status();
   const storage = RetentionService.stats();
   const lastRun = RetentionService.getLastRun();
+  const providerLimits = new Map<number, number>(ProviderRegistry.list().map((p: any) => [p.id, p.tpm_limit] as [number, number]));
+  const providerNames = new Map<number, string>(ProviderRegistry.list().map((p: any) => [p.id, p.name] as [number, string]));
+  const tpmSnapshot = TpmTracker.snapshot(providerLimits);
   const body = Metrics.render({
     poolSize: pool.size,
     poolReady: pool.ready,
@@ -557,7 +566,13 @@ app.get('/metrics', (req: Request, res: Response) => {
     usageRows: storage.usageRows,
     retentionDeletedTotal: (lastRun?.deletedUsage || 0) + (lastRun?.deletedHistory || 0),
     rotations: pool.metrics.rotations,
-    failovers: pool.metrics.failovers
+    failovers: pool.metrics.failovers,
+    providers: tpmSnapshot.map((t: any) => ({
+      name: providerNames.get(t.providerId) || String(t.providerId),
+      used: t.used,
+      limit: t.limit,
+      total: TpmTracker.totalFor(t.providerId)
+    }))
   });
   res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
   res.send(body);
@@ -829,6 +844,10 @@ const SETTING_WHITELIST = new Set([
   'pool_acquire_timeout_ms',
   'upstream_connections',
   'gateway_max_inflight_bytes',
+  'gateway_mapreduce_enabled',
+  'gateway_mapreduce_context_limit',
+  'gateway_mapreduce_chunk_tokens',
+  'gateway_mapreduce_max_chunks',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',
@@ -1097,6 +1116,7 @@ export function startServer(port: number = PORT, host?: string) {
   return server;
 }
 
-if (require.main === module) {
+if (isDirectRun) {
+  bootstrap();
   startServer();
 }

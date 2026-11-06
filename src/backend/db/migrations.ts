@@ -162,6 +162,7 @@ export function runMigrations(db: Database.Database): void {
   addColumnTo('api_keys', 'spend_cap_usd_daily', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'spend_cap_usd_monthly', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'egress_policy', "TEXT DEFAULT ''");
+  addColumnTo('providers', 'tpm_limit', 'INTEGER DEFAULT 0');
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_tcp ON configs(tcp_alive)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_health ON configs(health_score)`);
@@ -225,7 +226,12 @@ export function runMigrations(db: Database.Database): void {
     pool_max_inflight_per_slot: '32',
     pool_acquire_timeout_ms: '10000',
     upstream_connections: '64',
-    gateway_max_inflight_bytes: String(256 * 1024 * 1024)
+    gateway_max_inflight_bytes: String(256 * 1024 * 1024),
+    // Map-reduce for prompts larger than the model window (opt-in, non-streaming)
+    gateway_mapreduce_enabled: 'false',
+    gateway_mapreduce_context_limit: '0',
+    gateway_mapreduce_chunk_tokens: '30000',
+    gateway_mapreduce_max_chunks: '16'
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

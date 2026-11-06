@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { db } from '../db/database';
 import { Metrics } from '../metrics';
+import { TpmTracker } from '../providers/tpm-tracker';
 
 export interface ApiKeyRow {
   id: number;
@@ -211,6 +212,8 @@ export class KeyManager {
       // Feed Prometheus counters from the single accounting choke point, so
       // streaming and non-streaming paths are both covered.
       Metrics.recordUsage(params.promptTokens, params.completionTokens, params.costUsd ?? 0);
+      // Feed the per-provider TPM window used for admission decisions.
+      if (params.providerId) TpmTracker.record(params.providerId, params.totalTokens);
       Metrics.recordRequest(params.statusCode, params.latencyMs);
 
       db.prepare(
