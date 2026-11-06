@@ -16,7 +16,29 @@ interface GatewayRequest extends Request {
 }
 
 const MAX_ATTEMPTS = 2;
-const MAX_SSE_BUFFER = 2 * 1024 * 1024;
+// Bounded per-stream scanner buffer. 256 KB is far more than any single SSE
+// event needs; the old 2 MB multiplied by concurrency was a real memory risk.
+const MAX_SSE_BUFFER = 256 * 1024;
+
+// Global admission control: protects the single Node process from being handed
+// more concurrent streams than it can relay.
+let activeRequests = 0;
+
+function maxConcurrentRequests(): number {
+  return Math.max(1, parseInt(getSetting('gateway_max_concurrent', '200'), 10) || 200);
+}
+
+// Bytes currently buffered for in-flight requests. Bodies are parsed into memory,
+// so N concurrent 1.2 MB bodies cost N x a few MB. This budget is what keeps a
+// large-payload workload from OOMing the host.
+let inFlightBytes = 0;
+
+function maxInFlightBytes(): number {
+  const configured = parseInt(getSetting('gateway_max_inflight_bytes', String(256 * 1024 * 1024)), 10);
+  // Floor is 64 KB (not 1 MB) so operators can set a genuinely small budget for
+  // memory-constrained hosts and test the guard.
+  return Math.max(64 * 1024, Number.isFinite(configured) ? configured : 256 * 1024 * 1024);
+}
 
 function gatewayEnabled(): boolean {
   return getSetting('gateway_enabled', 'false') === 'true';
@@ -285,6 +307,35 @@ export function createGatewayRouter(): Router {
   router.post('/chat/completions', authMiddleware, async (req: GatewayRequest, res: Response) => {
     const key = req.apiKey!;
     const body = req.body;
+
+    // Admission control: refuse fast with Retry-After instead of accepting work
+    // the process cannot relay (which shows up as timeouts and runaway memory).
+    if (activeRequests >= maxConcurrentRequests()) {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json(
+        openAiError('The gateway is at its concurrency limit. Retry shortly.', 'server_error', 'too_many_concurrent_requests')
+      );
+      return;
+    }
+
+    const declaredBytes =
+      Number((req as any).rawBodyBytes) ||
+      parseInt(String(req.headers['content-length'] || '0'), 10) ||
+      0;
+    if (inFlightBytes + declaredBytes > maxInFlightBytes()) {
+      res.setHeader('Retry-After', '1');
+      res.status(503).json(
+        openAiError('The gateway is buffering too much request data right now. Retry shortly.', 'server_error', 'inflight_bytes_exceeded')
+      );
+      return;
+    }
+
+    activeRequests++;
+    inFlightBytes += declaredBytes;
+    res.once('close', () => {
+      activeRequests = Math.max(0, activeRequests - 1);
+      inFlightBytes = Math.max(0, inFlightBytes - declaredBytes);
+    });
 
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       res.status(400).json(openAiError('Request body must be a JSON object.', 'invalid_request_error', 'invalid_body'));

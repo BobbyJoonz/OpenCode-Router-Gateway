@@ -80,7 +80,7 @@ export class UpstreamClient {
     const agent = new ProxyAgent({
       uri: `http://127.0.0.1:${httpProxyPort}`,
       // Keep the pool small: a single Xray inbound is the bottleneck anyway.
-      connections: 16,
+      connections: Math.max(4, parseInt(getSetting('upstream_connections', '64'), 10) || 64),
       pipelining: 1
     });
     this.agents.set(httpProxyPort, agent);
@@ -89,7 +89,7 @@ export class UpstreamClient {
 
   private static directDispatcher(): Dispatcher {
     if (!this.directAgent) {
-      this.directAgent = new Agent({ connections: 16, pipelining: 1 });
+      this.directAgent = new Agent({ connections: Math.max(4, parseInt(getSetting('upstream_connections', '64'), 10) || 64), pipelining: 1 });
     }
     return this.directAgent;
   }

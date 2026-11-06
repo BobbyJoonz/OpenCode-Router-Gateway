@@ -56,7 +56,17 @@ app.use(createSecurityGuardMiddleware(PORT, INITIAL_BIND_HOST));
 // Route-specific parser for the gateway. body-parser enforces its limit on the
 // bytes actually received, so a `Transfer-Encoding: chunked` request cannot slip
 // past the content-length check in the auth middleware.
-app.use('/v1', express.json({ limit: process.env.GATEWAY_MAX_BODY || '8mb' }));
+app.use(
+  '/v1',
+  express.json({
+    limit: process.env.GATEWAY_MAX_BODY || '8mb',
+    // Capture the real body size: fetch/undici may send a chunked body without a
+    // content-length header, and the byte budget must still see it.
+    verify: (req: any, _res: any, buf: Buffer) => {
+      req.rawBodyBytes = buf.length;
+    }
+  })
+);
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -814,6 +824,11 @@ const SETTING_WHITELIST = new Set([
   'alert_telegram_chat_id',
   'alert_cooldown_seconds',
   'alert_check_interval_seconds',
+  'gateway_max_concurrent',
+  'pool_max_inflight_per_slot',
+  'pool_acquire_timeout_ms',
+  'upstream_connections',
+  'gateway_max_inflight_bytes',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',

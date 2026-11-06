@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   const code = invite.json?.invite_code as string;
   check('invite created', typeof code === 'string' && code.startsWith('inv-'), JSON.stringify(invite.json));
 
-  await req('/api/settings', { method: 'PUT', body: { signup_enabled: 'true', signup_max_per_ip_per_day: '10' } });
+  await req('/api/settings', { method: 'PUT', body: { signup_enabled: 'true', signup_max_per_ip_per_day: '10000' } });
 
   const badInvite = await req('/api/signup', { method: 'POST', body: { inviteCode: 'inv-nope', name: 'x' } });
   check('invalid invite -> 401', badInvite.status === 401, `status ${badInvite.status}`);
@@ -189,7 +189,7 @@ async function main(): Promise<void> {
   const invite2 = await req('/api/invites', { method: 'POST', body: { label: 'ip-limit', maxUses: 5 } });
   const ipLimited = await req('/api/signup', { method: 'POST', body: { inviteCode: invite2.json?.invite_code, name: 'ip2' } });
   check('per-IP signup limit enforced', ipLimited.status === 429, `status ${ipLimited.status}`);
-  await req('/api/settings', { method: 'PUT', body: { signup_max_per_ip_per_day: '10' } });
+  await req('/api/settings', { method: 'PUT', body: { signup_max_per_ip_per_day: '10000' } });
 
   // ------------------------------------------------- C6 observability
   section('C6 — customer observability');

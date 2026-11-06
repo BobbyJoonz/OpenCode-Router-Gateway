@@ -219,7 +219,13 @@ export function runMigrations(db: Database.Database): void {
     alert_webhook_url: '',
     alert_telegram_chat_id: '',
     alert_cooldown_seconds: '900',
-    alert_check_interval_seconds: '300'
+    alert_check_interval_seconds: '300',
+    // Processing / concurrency limits
+    gateway_max_concurrent: '200',
+    pool_max_inflight_per_slot: '32',
+    pool_acquire_timeout_ms: '10000',
+    upstream_connections: '64',
+    gateway_max_inflight_bytes: String(256 * 1024 * 1024)
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

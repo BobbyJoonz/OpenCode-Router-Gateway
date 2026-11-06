@@ -117,7 +117,8 @@ export class ProviderRouter {
         // The body is needed to tell "model not found" (retry another provider)
         // from "context too long" (retry is pointless) — the status code alone is
         // not enough, because providers disagree on it.
-        const errorText = await UpstreamClient.readAll(forwarded.body).catch(() => '');
+        // Cap the error body: some providers return megabytes of HTML on 5xx.
+        const errorText = await UpstreamClient.readAll(forwarded.body, 64 * 1024).catch(() => '');
         const headers = forwarded.headers;
         forwarded.cleanup();
         const info = classifyUpstream(forwarded.statusCode, errorText);

@@ -180,16 +180,38 @@ export class EgressPool {
    * Get a ready slot for a client, preferring its previously assigned one.
    */
   public async acquire(keyId: number | null, policyOverride?: string): Promise<XraySlot | null> {
-    const ready = this.slots.filter((s) => s.state === 'ready');
+    // Bounded admission: a slot may only carry N concurrent requests. Beyond that
+    // the caller waits (up to a timeout) instead of piling unbounded work onto a
+    // single upstream node — which is what turns a slow node into an OOM.
+    const maxPerSlot = Math.max(1, parseInt(getSetting('pool_max_inflight_per_slot', '32'), 10) || 32);
+    const timeoutMs = Math.max(0, parseInt(getSetting('pool_acquire_timeout_ms', '10000'), 10));
+    const deadline = Date.now() + timeoutMs;
+
+    let ready = this.slots.filter((s) => s.state === 'ready');
     if (ready.length === 0) {
       await this.ensureAll();
-      const retry = this.slots.filter((s) => s.state === 'ready');
-      if (retry.length === 0) return null;
-      return this.choose(retry, keyId, policyOverride);
+      ready = this.slots.filter((s) => s.state === 'ready');
+      if (ready.length === 0) return null;
     }
-    const chosen = this.choose(ready, keyId, policyOverride);
-    if (chosen && keyId !== null) this.sticky.set(keyId, chosen.index);
-    return chosen;
+
+    for (;;) {
+      const available = ready.filter((s) => s.inFlight < maxPerSlot);
+      if (available.length > 0) {
+        const chosen = this.choose(available, keyId, policyOverride);
+        if (chosen && keyId !== null) this.sticky.set(keyId, chosen.index);
+        return chosen;
+      }
+
+      if (Date.now() >= deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      ready = this.slots.filter((s) => s.state === 'ready');
+      if (ready.length === 0) {
+        await this.ensureAll();
+        ready = this.slots.filter((s) => s.state === 'ready');
+        if (ready.length === 0) return null;
+      }
+    }
   }
 
   private choose(candidates: XraySlot[], keyId: number | null, policyOverride?: string): XraySlot {
@@ -302,12 +324,19 @@ export class EgressPool {
 
   /** Mark the node serving this slot as degraded and rotate away from it. */
   public async penalize(slot: XraySlot, reason: string): Promise<boolean> {
-    if (slot.node) {
-      db.prepare(
-        `UPDATE configs SET consecutive_failures = consecutive_failures + 1, last_error = ?,
-                            last_status = CASE WHEN consecutive_failures + 1 >= 2 THEN 'failed' ELSE last_status END
-          WHERE id = ?`
-      ).run(reason, slot.node.id);
+    // A rate-limited node is not a broken node: rotate away from it without
+    // burning its status, otherwise a burst of 429s marks the whole pool failed.
+    const isRateLimit = /rate.?limit|429/i.test(reason);
+    if (slot.node && !isRateLimit) {
+      try {
+        db.prepare(
+          `UPDATE configs SET consecutive_failures = consecutive_failures + 1, last_error = ?,
+                              last_status = CASE WHEN consecutive_failures + 1 >= 3 THEN 'failed' ELSE last_status END
+            WHERE id = ?`
+        ).run(reason, slot.node.id);
+      } catch {
+        // A bookkeeping failure must never break the request path.
+      }
     }
     return this.rotateSlot(slot.index, reason);
   }
@@ -335,6 +364,16 @@ export class EgressPool {
       this.recordEvent(slot.index, 'error', slot.lastError || 'start failed', row.id);
       return { ok: false, ms, error: slot.lastError || 'start failed' };
     }
+    // A successful start is proof the node works: clear the failure history so a
+    // recovered node is not permanently excluded from ranking.
+    try {
+      db.prepare(
+        `UPDATE configs SET last_status = 'working', consecutive_failures = 0, last_error = NULL WHERE id = ?`
+      ).run(row.id);
+    } catch {
+      /* ignore */
+    }
+
     this.recordEvent(slot.index, 'start', `slot ${slot.index} serving #${row.id} ${row.address}:${row.port}`, row.id);
     return { ok: true, ms };
   }
@@ -360,7 +399,11 @@ export class EgressPool {
     const tiers = [
       `SELECT * FROM configs WHERE last_status = 'working' AND (? IS NULL OR id != ?) ${order}`,
       `SELECT * FROM configs WHERE last_status != 'failed' AND tcp_alive = 1 AND (? IS NULL OR id != ?) ${order}`,
-      `SELECT * FROM configs WHERE last_status = 'untested' AND tcp_alive IS NULL AND (? IS NULL OR id != ?) ${order}`
+      `SELECT * FROM configs WHERE last_status = 'untested' AND tcp_alive IS NULL AND (? IS NULL OR id != ?) ${order}`,
+      // Last resort: ignore status entirely. Without this tier the pool can drain
+      // itself to zero (every node marked failed) and never recover, because no
+      // tier would ever pick a failed node again.
+      `SELECT * FROM configs WHERE (? IS NULL OR id != ?) ${order}`
     ];
 
     for (const sql of tiers) {

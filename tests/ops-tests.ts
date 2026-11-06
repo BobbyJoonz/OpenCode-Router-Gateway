@@ -9,6 +9,7 @@ import http from 'http';
 
 const GW = process.env.GATEWAY_URL || 'http://127.0.0.1:3001';
 const HOOK_PORT = parseInt(process.env.HOOK_PORT || '19120', 10);
+const SLOW_PORT = parseInt(process.env.SLOW_PORT || '19121', 10);
 
 let pass = 0;
 let fail = 0;
@@ -150,6 +151,76 @@ async function main(): Promise<void> {
   const reinitBack = await req('/api/egress/reinit', { body: { size: 2 } });
   check('pool can be resized down', reinitBack.json?.status?.size === 2, `size ${reinitBack.json?.status?.size}`);
   await req('/api/egress/ensure');
+
+  // ------------------------------------------------- concurrency guards
+  section('Concurrency and byte-budget guards');
+  {
+    const slow = http.createServer((request, response) => {
+      request.on('data', () => {});
+      request.on('end', () => {
+        setTimeout(() => {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(
+            JSON.stringify({
+              object: 'chat.completion',
+              choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 }
+            })
+          );
+        }, 800);
+      });
+    });
+    await new Promise<void>((resolve) => slow.listen(SLOW_PORT, '127.0.0.1', () => resolve()));
+
+    await req('/api/settings', {
+      method: 'PUT',
+      body: {
+        gateway_enabled: 'true',
+        gateway_upstream_base_url: `http://127.0.0.1:${SLOW_PORT}/v1`,
+        gateway_upstream_bypass_proxy_loopback: 'true',
+        gateway_max_concurrent: '1'
+      }
+    });
+    const guardKey = await req('/api/keys', { method: 'POST', body: { name: 'guard-test', rpmLimit: 1000 } });
+    const GK = guardKey.json?.key as string;
+    const smallBody = { model: 'm', messages: [{ role: 'user', content: 'x' }] };
+
+    const first = fetch(`${GW}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${GK}`, 'content-type': 'application/json' },
+      body: JSON.stringify(smallBody)
+    }).then((r) => r.text());
+    await new Promise((r) => setTimeout(r, 150));
+    const second = await fetch(`${GW}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${GK}`, 'content-type': 'application/json' },
+      body: JSON.stringify(smallBody)
+    });
+    const secondText = await second.text();
+    check('concurrency cap rejects the overflow request', second.status === 503, `status ${second.status}`);
+    check('concurrency cap returns a specific code', /too_many_concurrent_requests/.test(secondText), secondText.slice(0, 120));
+    check('concurrency cap sets Retry-After', !!second.headers.get('retry-after'));
+    await first;
+
+    await req('/api/settings', { method: 'PUT', body: { gateway_max_concurrent: '1000', gateway_max_inflight_bytes: '200000' } });
+    const big = await fetch(`${GW}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${GK}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'y'.repeat(300000) }] })
+    });
+    const bigText = await big.text();
+    check('byte budget rejects an oversized body', big.status === 503, `status ${big.status}`);
+    check('byte budget returns a specific code', /inflight_bytes_exceeded/.test(bigText), bigText.slice(0, 120));
+
+    await req('/api/settings', {
+      method: 'PUT',
+      body: { gateway_max_inflight_bytes: String(256 * 1024 * 1024), gateway_enabled: 'false' }
+    });
+    for (const k of (await req('/api/keys')).json?.keys || []) {
+      if (k.name === 'guard-test') await req(`/api/keys/${k.id}`, { method: 'DELETE' });
+    }
+    slow.close();
+  }
 
   // ----------------------------------------------------------------- cleanup
   section('Cleanup');
