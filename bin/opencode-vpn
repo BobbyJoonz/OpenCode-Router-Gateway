@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Dedicated OpenCode VPN Launcher
+# Injects the active local proxy specifically for OpenCode without system-wide routing changes.
+
+HTTP_PORT="${OPENCODE_HTTP_PROXY_PORT:-10809}"
+SOCKS_PORT="${OPENCODE_SOCKS_PROXY_PORT:-10808}"
+
+export http_proxy="http://127.0.0.1:${HTTP_PORT}"
+export https_proxy="http://127.0.0.1:${HTTP_PORT}"
+export HTTP_PROXY="http://127.0.0.1:${HTTP_PORT}"
+export HTTPS_PROXY="http://127.0.0.1:${HTTP_PORT}"
+export all_proxy="socks5://127.0.0.1:${SOCKS_PORT}"
+export ALL_PROXY="socks5://127.0.0.1:${SOCKS_PORT}"
+
+OPENCODE_BIN="/usr/local/bin/opencode"
+if [ ! -x "$OPENCODE_BIN" ]; then
+  OPENCODE_BIN=$(which opencode 2>/dev/null || echo "opencode")
+fi
+
+exec "$OPENCODE_BIN" "$@"

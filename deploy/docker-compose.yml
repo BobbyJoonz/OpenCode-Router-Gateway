@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# OpenCode Router Gateway — docker compose stack
+#
+#   1. cp .env.example .env   and fill in GATEWAY_UPSTREAM_*
+#   2. docker compose -f deploy/docker-compose.yml up -d --build
+#
+# The gateway is published on loopback only; Caddy (deploy/Caddyfile) terminates
+# TLS and is the only public listener.
+# ---------------------------------------------------------------------------
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        XRAY_BASE: ${XRAY_BASE:-https://github.com}
+    image: opencode-router-gateway:latest
+    container_name: orgw
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      PORT: "3000"
+      DATA_DIR: /app/data
+    ports:
+      # Bind to loopback: publish through Caddy / a tunnel, never straight to the internet.
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ../data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

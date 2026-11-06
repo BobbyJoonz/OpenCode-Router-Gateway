@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# systemd unit — bare-metal install
+#
+#   sudo cp deploy/opencode-router.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now opencode-router
+#   journalctl -u opencode-router -f
+# ---------------------------------------------------------------------------
+[Unit]
+Description=OpenCode Router Gateway (rotating egress + OpenAI-compatible API)
+Documentation=https://github.com/BobbyJoonz/OpenCode-Router-Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode
+Group=opencode
+WorkingDirectory=/opt/opencode-router
+EnvironmentFile=/opt/opencode-router/.env
+ExecStart=/opt/opencode-router/node_modules/.bin/tsx src/backend/server.ts
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillMode=mixed
+
+# --- hardening -----------------------------------------------------------
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/opencode-router/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+LimitNOFILE=65535
+
+# --- logging -------------------------------------------------------------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode-router
+
+[Install]
+WantedBy=multi-user.target

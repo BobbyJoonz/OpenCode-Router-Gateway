@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# Caddy — TLS terminator / public entrypoint
+#
+#   DOMAIN=api.example.com caddy run --config deploy/Caddyfile
+#
+# Security model:
+#   * Only /v1/* is publicly reachable (the OpenAI-compatible surface).
+#   * /api/* (management, can start/stop the engine) is restricted to localhost,
+#     i.e. you reach it through an SSH tunnel or from the box itself.
+#   * Everything else returns 404.
+# ---------------------------------------------------------------------------
+{
+	# Uncomment for staging/testing without real certificates.
+	# auto_https off
+}
+
+{$DOMAIN:localhost} {
+	encode zstd gzip
+
+	# Do not log Authorization headers.
+	log {
+		output file /var/log/caddy/opencode-router.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+		format console
+	}
+
+	# --- public: the OpenAI-compatible API only -------------------------
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:3000 {
+			header_up X-Forwarded-For {remote_host}
+			# Streaming responses must not be buffered.
+			flush_interval -1
+		}
+	}
+
+	# --- private: management API, localhost only ------------------------
+	handle /api/* {
+		@local remote_ip 127.0.0.1 ::1
+		handle @local {
+			reverse_proxy 127.0.0.1:3000
+		}
+		respond "Management API is not publicly accessible." 403
+	}
+
+	# --- nothing else is exposed ----------------------------------------
+	handle {
+		respond 404
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}

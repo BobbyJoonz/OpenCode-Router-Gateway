@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build Outputs
+dist/
+dist-release/
+src/frontend/dist/
+/.vitepress/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# Data and SQLite Runtime Storage
+data/*
+!data/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+
+# Logs & Diagnostics
+*.log
+logs/
+
+# Compiled Binaries and Assets (auto-downloaded by start.sh / install.sh)
+bin/xray
+bin/xray.exe
+bin/geoip.dat
+bin/geosite.dat
+bin/LICENSE
+bin/LICENSE-Wintun
+bin/README.md
+bin/wintun.dll
+bin/xray_no_window.*
+
+# Runtime artefacts
+data/probe-*.json
+data/active-xray-config.json
+data/active-connection.json
+
+# Secrets — never commit these
+.env
+.env.local
+.env.*.local
+!.env.example
+.gh_token
+.testkey
+
+# Development and Local Indexers
+.omo/
+.codegraph
+.cache/
+.vscode/
+.idea/
+
+# OS Metadata
+.DS_Store
+Thumbs.db
