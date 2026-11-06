@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npx tsx tests/test-scenarios.ts",
     "test:gateway": "npx tsx tests/gateway-tests.ts",
-    "test:all": "npm run typecheck && npm run test:anthropic && npm run test:retention && npm run test:tpm && npm run test:mapreduce && npm test && npm run test:side-effects && npm run test:service && npm run test:routing && npm run test:gateway && npm run test:ops",
+    "test:all": "npm run typecheck && npm run test:anthropic && npm run test:retention && npm run test:tpm && npm run test:mapreduce && npm run test:fresh && npm test && npm run test:side-effects && npm run test:service && npm run test:routing && npm run test:gateway && npm run test:ops",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
@@ -42,7 +42,8 @@
     "start:cluster": "npx tsx src/backend/cluster.ts",
     "start:cluster:prod": "node dist/backend/cluster.js",
     "test:tpm": "npx tsx tests/tpm-tests.ts",
-    "test:mapreduce": "npx tsx tests/mapreduce-tests.ts"
+    "test:mapreduce": "npx tsx tests/mapreduce-tests.ts",
+    "test:fresh": "npx tsx tests/fresh-db.test.ts"
   },
   "keywords": [
     "opencode",

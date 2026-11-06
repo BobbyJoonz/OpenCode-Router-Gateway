@@ -44,6 +44,7 @@ jobs:
           npm run test:retention
           npm run test:tpm
           npm run test:mapreduce
+          npm run test:fresh
           npm run test:side-effects
 
       - name: Core acceptance scenarios (A-G)

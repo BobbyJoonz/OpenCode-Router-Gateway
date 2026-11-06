@@ -22,7 +22,10 @@ export class OpenCodeService {
 
   private constructor() {
     const projectRoot = PROJECT_ROOT;
-    this.launcherPath = path.join(projectRoot, 'bin', this.isWin ? 'opencode-vpn.cmd' : 'opencode-vpn');
+    // The launcher is written at startup. Under systemd hardening the project
+    // directory is read-only, so allow an explicit writable location.
+    const launcherDir = process.env.OPENCODE_LAUNCHER_DIR || path.join(projectRoot, 'bin');
+    this.launcherPath = path.join(launcherDir, this.isWin ? 'opencode-vpn.cmd' : 'opencode-vpn');
 
     this.resolveBinaryPath();
 

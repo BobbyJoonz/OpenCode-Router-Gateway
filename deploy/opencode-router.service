@@ -20,6 +20,9 @@ WorkingDirectory=/opt/opencode-router
 EnvironmentFile=/opt/opencode-router/.env
 # Cap the heap so a leak fails fast instead of OOM-killing the host.
 Environment=NODE_OPTIONS=--max-old-space-size=512
+# The launcher wrapper is written at startup; /opt is read-only under
+# ProtectSystem=strict, so it goes into the writable data directory.
+Environment=OPENCODE_LAUNCHER_DIR=/opt/opencode-router/data/bin
 # Compiled output: no tsx/transpiler at runtime (lower RAM, faster start).
 ExecStart=/usr/bin/node /opt/opencode-router/dist/backend/server.js
 Restart=always

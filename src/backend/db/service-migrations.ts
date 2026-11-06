@@ -24,9 +24,16 @@ export function runServiceMigrations(db: Database.Database): void {
     );
 
     -- ------------------------------------------------------------------
-    -- C3: money. model_prices is created by the gateway migrations
-    -- (cost_per_1m_in / cost_per_1m_out); this file only seeds it.
+    -- C3: money. model_prices used to be "owned by the gateway migrations",
+    -- except no migration ever created it, so a brand-new database crashed on
+    -- the first start (SqliteError: no such table: model_prices). It lives here
+    -- with the canonical columns the runtime reads.
     -- ------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS model_prices (
+      model         TEXT PRIMARY KEY,
+      input_per_1m  REAL NOT NULL DEFAULT 0,
+      output_per_1m REAL NOT NULL DEFAULT 0
+    );
 
     -- ------------------------------------------------------------------
     -- C4: abuse signals
