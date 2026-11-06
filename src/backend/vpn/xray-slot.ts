@@ -71,6 +71,15 @@ export class XraySlot {
   public async start(row: SlotConfigRow): Promise<boolean> {
     await this.stop();
 
+    // Pre-flight: a foreign process on our port produces a confusing
+    // "ports never opened" error. Detect it and say who owns the port.
+    const occupied = await this.describePortConflict();
+    if (occupied) {
+      this.lastError = occupied;
+      this.state = 'stopped';
+      return false;
+    }
+
     let details: Record<string, any> = {};
     try {
       const parsed = JSON.parse(row.details_json || '{}');
@@ -192,6 +201,17 @@ export class XraySlot {
     return this.portsOpen();
   }
 
+  private async describePortConflict(): Promise<string | null> {
+    for (const port of [this.socksPort, this.httpPort]) {
+      if (!(await probePort(port))) continue;
+      const owner = findPortOwner(port);
+      return owner
+        ? `port ${port} is already in use by PID ${owner} — change pool_base_port or stop that process`
+        : `port ${port} is already in use — change pool_base_port or stop the other program`;
+    }
+    return null;
+  }
+
   private handleExit(): void {
     if (this.exitNotified) return;
     this.exitNotified = true;
@@ -232,8 +252,35 @@ export class XraySlot {
   }
 }
 
-export function probePort(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
+/**
+ * Best-effort: which PID is listening on a loopback port?
+ * Used only to produce a human-readable conflict message.
+ */
+export function findPortOwner(port: number): number | null {
+  try {
+    if (process.platform === 'win32') {
+      const out = execSync('netstat -ano -p TCP', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+      for (const line of out.split(/\r?\n/)) {
+        if (!line.includes(`:${port}`)) continue;
+        if (!/LISTENING/i.test(line)) continue;
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[parts.length - 1], 10);
+        if (Number.isInteger(pid) && pid > 0) return pid;
+      }
+      return null;
+    }
+    const out = execSync(`ss -lptnH 'sport = :${port}'`, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    const match = /pid=(\d+)/.exec(out);
+    return match ? parseInt(match[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function probePort(port: number): Promise<boolean> {  return new Promise((resolve) => {
     const socket = new net.Socket();
     let settled = false;
     const done = (v: boolean) => {

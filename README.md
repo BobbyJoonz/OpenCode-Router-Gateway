@@ -2,11 +2,11 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-3.0.0-emerald.svg)
+![Version](https://img.shields.io/badge/version-2.0.0-emerald.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-purple.svg)
-![Tests](https://img.shields.io/badge/integration%20tests-78%20passing-success.svg)
+![Tests](https://img.shields.io/badge/integration%20tests-53%20passing-success.svg)
 
 **An OpenAI-compatible API gateway whose egress IP rotates.**
 
@@ -150,114 +150,6 @@ The health monitor probes on `11818/11819` so it never disturbs the serving node
   literal). Fixed to single quotes.
 * Windows support: `xray.exe` resolution, `taskkill /F` process cleanup,
   `.cmd` launcher, `better-sqlite3` pinned to a version with prebuilds.
-
----
-
-## 3b. What was added in 3.0 — service edition (axis C)
-
-Everything below turns the gateway from "a good personal tool" into something
-that can serve other people.
-
-### C1 — multi-instance egress pool
-
-`src/backend/vpn/egress-pool.ts` + `xray-slot.ts`: N independent Xray processes on
-their own ports, each bound to a different node, with a watchdog, drain-before-
-rotate, and per-key stickiness.
-
-```bash
-curl -s http://127.0.0.1:3000/api/egress/status
-curl -s -X POST http://127.0.0.1:3000/api/egress/ensure
-curl -s -X POST http://127.0.0.1:3000/api/egress/rotate/0
-```
-
-### C2 — per-key routing
-
-Keys carry `pool_id` (restrict to one subscription), `sticky` (stay on the same
-slot while healthy) and `preferred_providers`. The selector picks
-round-robin / least-loaded / random.
-
-### C3 — money, not just tokens
-
-`model_prices` + `usage_log.cost_usd` + per-key `spend_cap_usd_daily/monthly`.
-A request is reserved against the cap before it is forwarded.
-
-```bash
-curl -s http://127.0.0.1:3000/api/prices
-curl -s -X PUT http://127.0.0.1:3000/api/prices \
-  -H 'content-type: application/json' \
-  -d '{"model":"gpt-4o-mini","costPer1mIn":0.15,"costPer1mOut":0.6}'
-curl -s http://127.0.0.1:3000/api/costs
-```
-
-### C4 — abuse detection
-
-`src/backend/gateway/abuse.ts` + `src/backend/service/abuse-guard.ts` (mounted in
-front of `/v1`). Signals: upstream 429s, 5xx, duplicate request bodies. Response
-is progressive — a throttled key gets a delay, a badly degraded key gets
-`429 too_many_failures`, and everything is logged to `abuse_events`.
-
-```bash
-curl -s http://127.0.0.1:3000/api/abuse/events
-curl -s -X POST http://127.0.0.1:3000/api/keys/3/reset-trust
-```
-
-### C5 — self-serve onboarding
-
-Invite-gated signup with a per-IP daily limit, plus a portal page and one-shot
-key display.
-
-```bash
-# admin: mint an invite
-curl -s -X POST http://127.0.0.1:3000/api/invites \
-  -H 'content-type: application/json' -d '{"label":"launch","maxUses":5}'
-
-# enable public signup
-curl -s -X PUT http://127.0.0.1:3000/api/settings \
-  -H 'content-type: application/json' -d '{"signup_enabled":"true"}'
-```
-
-Open `https://your-server/portal`.
-
-### C6 — customer-facing observability
-
-- `GET /status` — public HTML status page (uptime, ready slots, today's usage,
-  spend). No customer data.
-- `GET /api/public/status` — the same as JSON.
-- `usage_alerts` + `POST /api/alerts/check` — fire at 50/80/100 % of a token or
-  spend quota.
-
-### C7 — readiness and draining
-
-- `GET /readyz` — 200 only when an egress slot is ready and the instance is not
-  draining; 503 otherwise (wire this into your load balancer).
-- `POST /api/service/drain` / `POST /api/service/undrain` — flip readiness for a
-  rolling restart.
-
-> **Honest scope note:** true multi-instance HA still requires a shared database.
-> SQLite is single-writer, and the RPM limiter/reservations are per-process. See
-> [§11](#11-known-limitations).
-
-### C8 — legal baseline and data rights
-
-- `legal/TERMS.md`, `legal/PRIVACY.md`, `legal/DPA.md`,
-  `legal/DATA-RETENTION.md` — templates with explicit placeholders.
-- `GET /api/privacy/export?key_id=N` — JSON export of a key and its usage.
-- `DELETE /api/privacy/erase?key_id=N` — erase the key and all of its metadata.
-- Prompt/completion **content is never persisted**, so a deletion request is
-  genuinely complete.
-
-### Also in 3.0
-
-- `tools/rotation-experiment/` — a reproducible A/B harness that measures whether
-  IP rotation actually resets a provider's rate limit (see axis D).
-- `src/backend/providers/` — independent upstream providers with priority,
-  cost and per-provider caps, plus `gateway/provider-router.ts` for provider-level
-  failover.
-- `src/backend/tester/freshness.ts` — IP-freshness instrumentation (successes
-  before the first 429).
-
-**Test totals:** 53 gateway assertions + 25 service assertions + the original
-acceptance/security suites, all green; `tsc --noEmit` clean.
 
 ---
 
@@ -563,6 +455,33 @@ the concurrent-run 409), health endpoint, and a **proof that traffic really goes
 through Xray** (a loopback upstream is unreachable when the bypass is disabled).
 
 Result on this machine: **53 passed, 0 failed**.
+
+---
+
+## 10.5 Egress pool (B1–B3)
+
+The gateway no longer runs a single connection. A pool of independent Xray
+**slots** (default 2, `pool_size`, max 8) each hold their own node on their own
+loopback port pair (`pool_base_port`, default 12000).
+
+| Capability | How it works | Endpoint |
+|---|---|---|
+| **B1 automatic failover** | Each slot's process is watched; a dead slot is replaced immediately by the best candidate (watchdog every 2s + immediate `exit` handling) | `GET /api/egress/status` |
+| **B2 zero-drop rotation** | A planned rotation marks the slot `draining`, waits for in-flight streams (up to `pool_drain_timeout_ms`, default 15s), then swaps the node. Other slots keep serving during the drain | `POST /api/egress/rotate/:slot` |
+| **B3 per-client stickiness** | A client key is pinned to a slot; it only moves when that slot is rotated or dies | `GET /v1/usage` → `assigned_slot` |
+| **Diagnostics** | Per-slot state, node, PID, uptime, in-flight, last error, plus rotations/failovers/drain-timeouts/churn metrics and a rolling event log | dashboard panel *Egress pool* |
+
+Measured on this machine:
+
+```
+B1: kill -9 on the serving xray  ->  slot replaced automatically, < 5 s
+B2: rotate during an in-flight SSE stream -> stream completed with [DONE],
+    zero 'stream_interrupted' errors, rotation waited for the drain
+B3: 6 consecutive requests  ->  assigned_slot unchanged
+```
+
+Port conflicts are detected before spawning and reported with the owning PID, so
+a clash with v2rayN/clash no longer looks like "the node is dead".
 
 ---
 

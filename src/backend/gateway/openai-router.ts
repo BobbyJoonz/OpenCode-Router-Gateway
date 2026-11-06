@@ -195,7 +195,8 @@ export function createGatewayRouter(): Router {
       today_tokens: KeyManager.tokensUsedToday(key.id),
       daily_token_limit: key.daily_token_limit,
       rpm_limit: key.rpm_limit,
-      sticky_slots: egressPool.status().slots.map((s) => ({ slot: s.index, nodeId: s.node?.id ?? null }))
+      assigned_slot: egressPool.getStickySlot(key.id),
+      pool: egressPool.status().slots.map((s) => ({ slot: s.index, nodeId: s.node?.id ?? null, state: s.state }))
     });
   });
 

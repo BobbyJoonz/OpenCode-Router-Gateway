@@ -101,7 +101,10 @@ export class EgressPool {
   }
 
   public init(size?: number): void {
-    const configured = Math.max(1, Math.min(size ?? (parseInt(getSetting('pool_size', '2'), 10) || 2), 8));
+    const configured = Math.max(
+      1,
+      Math.min(size ?? (parseInt(getSetting('pool_size', '2'), 10) || 2), 8)
+    );
     if (this.size === configured && this.slots.length === configured) return;
 
     this.stopWatchdog();
@@ -185,6 +188,12 @@ export class EgressPool {
 
   public release(slot: XraySlot): void {
     slot.inFlight = Math.max(0, slot.inFlight - 1);
+  }
+
+  /** Slot a client key is currently pinned to (B3). */
+  public getStickySlot(keyId: number): number | null {
+    const slot = this.sticky.get(keyId);
+    return slot === undefined ? null : slot;
   }
 
   public track(slot: XraySlot): void {

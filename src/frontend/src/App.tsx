@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { Dashboard } from './components/Dashboard';
 import { TestingLiveFeed, LiveCandidateLog } from './components/TestingLiveFeed';
+import { EgressPoolPanel } from './components/EgressPoolPanel';
 import { ConfigTable } from './components/ConfigTable';
 import { SourcesModal } from './components/SourcesModal';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
@@ -246,6 +247,7 @@ export const App: React.FC = () => {
             onImportConfigs={handleImportConfigs}
           />
         )}
+        <EgressPoolPanel />
       </main>
 
       {/* Modals */}

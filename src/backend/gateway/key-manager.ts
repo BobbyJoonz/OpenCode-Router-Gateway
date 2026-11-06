@@ -12,8 +12,6 @@ export interface ApiKeyRow {
   last_used_at: string | null;
   total_requests: number;
   total_tokens: number;
-  spend_cap_usd_daily: number;
-  spend_cap_usd_monthly: number;
 }
 
 export interface CreatedKey {
@@ -45,8 +43,6 @@ export class KeyManager {
     name: string;
     rpmLimit?: number;
     dailyTokenLimit?: number;
-    spendCapDailyUsd?: number;
-    spendCapMonthlyUsd?: number;
   }): CreatedKey {
     const name = (opts.name || '').trim();
     if (!name) throw new Error('name is required');
@@ -62,16 +58,12 @@ export class KeyManager {
     const keyHash = this.hash(secret);
     const keyPrefix = secret.slice(0, 12);
 
-    const dailyCap = Math.max(0, Number(opts.spendCapDailyUsd) || 0);
-    const monthlyCap = Math.max(0, Number(opts.spendCapMonthlyUsd) || 0);
-
     const info = db
       .prepare(
-        `INSERT INTO api_keys
-           (key_hash, key_prefix, name, rpm_limit, daily_token_limit, enabled, spend_cap_usd_daily, spend_cap_usd_monthly)
-         VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+        `INSERT INTO api_keys (key_hash, key_prefix, name, rpm_limit, daily_token_limit, enabled)
+         VALUES (?, ?, ?, ?, ?, 1)`
       )
-      .run(keyHash, keyPrefix, name, rpm, daily, dailyCap, monthlyCap);
+      .run(keyHash, keyPrefix, name, rpm, daily);
 
     return { id: Number(info.lastInsertRowid), key: secret, key_prefix: keyPrefix, name };
   }
@@ -80,9 +72,7 @@ export class KeyManager {
     return db
       .prepare(
         `SELECT id, key_prefix, name, rpm_limit, daily_token_limit, enabled,
-                created_at, last_used_at, total_requests, total_tokens,
-                COALESCE(spend_cap_usd_daily, 0) AS spend_cap_usd_daily,
-                COALESCE(spend_cap_usd_monthly, 0) AS spend_cap_usd_monthly
+                created_at, last_used_at, total_requests, total_tokens
            FROM api_keys ORDER BY id ASC`
       )
       .all() as ApiKeyRow[];
@@ -111,9 +101,7 @@ export class KeyManager {
     const row = db
       .prepare(
         `SELECT id, key_prefix, name, rpm_limit, daily_token_limit, enabled,
-                created_at, last_used_at, total_requests, total_tokens,
-                COALESCE(spend_cap_usd_daily, 0) AS spend_cap_usd_daily,
-                COALESCE(spend_cap_usd_monthly, 0) AS spend_cap_usd_monthly
+                created_at, last_used_at, total_requests, total_tokens
            FROM api_keys WHERE key_hash = ?`
       )
       .get(this.hash(secret)) as ApiKeyRow | undefined;
@@ -189,16 +177,14 @@ export class KeyManager {
     latencyMs: number;
     upstream: string;
     egressNodeId: number | null;
-    providerId?: number | null;
-    costUsd?: number;
     error?: string | null;
   }): void {
     try {
       db.prepare(
         `INSERT INTO usage_log
            (key_id, model, prompt_tokens, completion_tokens, total_tokens,
-            status_code, latency_ms, upstream, egress_node_id, provider_id, cost_usd, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            status_code, latency_ms, upstream, egress_node_id, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         params.keyId,
         params.model,
@@ -209,8 +195,6 @@ export class KeyManager {
         params.latencyMs,
         params.upstream,
         params.egressNodeId,
-        params.providerId ?? null,
-        params.costUsd ?? 0,
         params.error || null
       );
 

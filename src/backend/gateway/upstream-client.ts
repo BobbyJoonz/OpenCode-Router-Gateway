@@ -15,10 +15,6 @@ export interface ForwardOptions {
   body?: any;
   timeoutMs?: number;
   accept?: string;
-  /** Override the configured upstream (used by the provider router). */
-  baseUrl?: string;
-  /** Override the configured upstream key (resolved from the provider's env var). */
-  apiKey?: string;
 }
 
 export interface ForwardResult {
@@ -126,14 +122,12 @@ export class UpstreamClient {
 
   public static async forward(opts: ForwardOptions): Promise<ForwardResult> {
     const config = this.resolveConfig();
-    const baseUrl = (opts.baseUrl || config.baseUrl || '').trim();
-    if (!baseUrl) {
+    if (!config.baseUrl) {
       throw Object.assign(new Error('Upstream base URL is not configured'), { code: 'UPSTREAM_NOT_CONFIGURED' });
     }
 
-    const url = this.joinUrl(baseUrl, opts.path);
+    const url = this.joinUrl(config.baseUrl, opts.path);
     const timeoutMs = opts.timeoutMs ?? config.timeoutMs;
-    const apiKey = opts.apiKey !== undefined ? opts.apiKey : config.apiKey;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -142,8 +136,8 @@ export class UpstreamClient {
       'content-type': 'application/json',
       accept: opts.accept || 'application/json'
     };
-    if (apiKey) {
-      headers.authorization = `Bearer ${apiKey}`;
+    if (config.apiKey) {
+      headers.authorization = `Bearer ${config.apiKey}`;
     }
 
     try {

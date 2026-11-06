@@ -11,6 +11,6 @@
     "jsx": "react-jsx",
     "types": ["node"]
   },
-  "include": ["src/backend/**/*", "tests/**/*", "tools/**/*"],
+  "include": ["src/backend/**/*", "tests/**/*"],
   "exclude": ["node_modules", "src/frontend", "dist"]
 }
