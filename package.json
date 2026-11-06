@@ -1,4 +1,4 @@
-﻿{
+{
     "name":  "opencode-router-gateway",
     "version":  "3.0.0",
     "description":  "OpenAI-compatible gateway with a rotating Xray egress pool: /v1 chat completions, API keys, spend caps, abuse detection, self-serve onboarding, health monitoring, multi-provider routing and deployment assets.",
