@@ -27,6 +27,8 @@ export interface PoolStatus {
   /** Human-readable capacity state: full | reduced | none */
   capacity: 'full' | 'reduced' | 'none';
   capacityNote: string;
+  /** sticky | round_robin | least_loaded | random */
+  policy: string;
   lastEnsure: { at: string; started: number; noCandidate: boolean; ready: number } | null;
   slots: Array<{
     index: number;
@@ -79,6 +81,7 @@ export class EgressPool {
   private sticky = new Map<number, number>();
   private events: PoolEvent[] = [];
   private rotationTimes: number[] = [];
+  private rrCursor = 0;
   private lastEnsure: { at: string; started: number; noCandidate: boolean; ready: number } | null = null;
   private metrics = {
     rotations: 0,
@@ -186,14 +189,31 @@ export class EgressPool {
   }
 
   private choose(candidates: XraySlot[], keyId: number | null): XraySlot {
-    if (keyId !== null) {
+    const policy = getSetting('egress_policy', 'sticky');
+
+    // round_robin: spread clients across slots regardless of stickiness.
+    if (policy === 'round_robin') {
+      const ordered = candidates.slice().sort((a, b) => a.index - b.index);
+      const pick = ordered[this.rrCursor % ordered.length];
+      this.rrCursor = (this.rrCursor + 1) % 1_000_000;
+      return pick;
+    }
+
+    // random: useful to avoid hot-spotting when slots have equal capacity.
+    if (policy === 'random') {
+      return candidates[Math.floor(Math.random() * candidates.length)];
+    }
+
+    // sticky (default): keep a client on its slot, fall back to least-loaded.
+    if (policy === 'sticky' && keyId !== null) {
       const pinned = this.sticky.get(keyId);
       if (pinned !== undefined) {
         const slot = candidates.find((s) => s.index === pinned);
         if (slot) return slot;
       }
     }
-    // least loaded, then oldest (most stable)
+
+    // least_loaded (and sticky's first assignment): least loaded, then oldest.
     return candidates
       .slice()
       .sort((a, b) => a.inFlight - b.inFlight || (a.startedAt || 0) - (b.startedAt || 0))[0];
@@ -377,6 +397,7 @@ export class EgressPool {
       ready,
       capacity,
       capacityNote,
+      policy: getSetting('egress_policy', 'sticky'),
       lastEnsure: this.lastEnsure,
       slots,
       metrics: {

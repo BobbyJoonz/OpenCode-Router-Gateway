@@ -6,6 +6,7 @@ import { classifyHttp, classifyNetwork, openAiError } from './error-mapper';
 import { egressPool } from '../vpn/egress-pool';
 import { XraySlot } from '../vpn/xray-slot';
 import { ProviderRouter } from './provider-router';
+import { ModelRouter } from './model-router';
 import { FreshnessTracker } from '../tester/freshness';
 import { costOf, spendToday, spendThisMonth } from './cost';
 import { ProviderRow } from '../providers/provider-registry';
@@ -152,6 +153,9 @@ export function createGatewayRouter(): Router {
   router.get('/models', authMiddleware, async (_req: GatewayRequest, res: Response) => {
     const config = UpstreamClient.resolveConfig();
 
+    // Upstream models are merged with the aliases, never substituted for them.
+    const upstreamIds: string[] = [];
+
     if (ProviderRouter.hasProviders()) {
       const slot = await egressPool.acquire(null);
       if (slot) {
@@ -168,10 +172,12 @@ export function createGatewayRouter(): Router {
             const text = await UpstreamClient.readAll(forwarded.body);
             forwarded.cleanup();
             try {
-              res.json(JSON.parse(text));
-              return;
+              const parsed = JSON.parse(text);
+              for (const item of parsed?.data || []) {
+                if (item?.id && !upstreamIds.includes(item.id)) upstreamIds.push(item.id);
+              }
             } catch {
-              /* fall through */
+              /* not JSON */
             }
           } else {
             try {
@@ -189,18 +195,36 @@ export function createGatewayRouter(): Router {
       }
     }
 
-    const model = config.model || 'gpt-4o-mini';
-    res.json({
-      object: 'list',
-      data: [
-        {
-          id: model,
+    const aliases = ModelRouter.aliases();
+    const fallback = config.model || 'gpt-4o-mini';
+
+    const data: Array<{ id: string; object: string; created: number; owned_by: string }> = [
+      ...aliases.map((id) => ({
+        id,
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'opencode-router:route'
+      })),
+      ...upstreamIds
+        .filter((id) => !aliases.includes(id))
+        .map((id) => ({
+          id,
           object: 'model',
           created: Math.floor(Date.now() / 1000),
-          owned_by: 'opencode-router'
-        }
-      ]
-    });
+          owned_by: 'upstream'
+        }))
+    ];
+
+    if (data.length === 0) {
+      data.push({
+        id: fallback,
+        object: 'model',
+        created: Math.floor(Date.now() / 1000),
+        owned_by: 'opencode-router'
+      });
+    }
+
+    res.json({ object: 'list', data });
   });
 
   // ---------------------------------------------------------------- usage
@@ -243,6 +267,27 @@ export function createGatewayRouter(): Router {
       forwardBody = { ...body, stream_options: { include_usage: true, ...existing } };
     }
 
+    // Resolve the client's model name into (provider, upstream model) pairs.
+    // With routes configured this is what makes model selection deterministic.
+    const plan = ModelRouter.plan(body.model);
+    if (!plan) {
+      if (ModelRouter.requireRoute()) {
+        res.status(404).json(
+          openAiError(
+            `The model '${body.model ?? ''}' is not routed. Configure a route (POST /api/models) or set gateway_require_model_route=false.`,
+            'invalid_request_error',
+            'model_not_found'
+          )
+        );
+        return;
+      }
+      if (!body.model) {
+        res.status(400).json(openAiError('"model" is required.', 'invalid_request_error', 'missing_model'));
+        return;
+      }
+    }
+    const selection = plan ? { providerIds: plan.providerIds, modelByProvider: plan.modelByProvider } : undefined;
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const slot = await egressPool.acquire(key.id);
       if (!slot) {
@@ -270,7 +315,7 @@ export function createGatewayRouter(): Router {
           httpProxyPort: slot.httpPort,
           body: forwardBody,
           accept: wantsStream ? 'text/event-stream' : 'application/json'
-        });
+        }, selection);
         forwarded = routed.forwarded;
         provider = routed.provider;
       } catch (err: any) {

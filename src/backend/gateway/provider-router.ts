@@ -9,6 +9,13 @@ export interface ProviderForwardResult {
   attempts: number;
 }
 
+export interface ProviderSelection {
+  /** Provider ids to try, in order. Overrides the global policy. */
+  providerIds?: number[];
+  /** Per-provider upstream model name (from a model route). */
+  modelByProvider?: Record<number, string>;
+}
+
 /**
  * D4 — routes a request across independent providers.
  *
@@ -57,20 +64,40 @@ export class ProviderRouter {
     return this.available().length > 0;
   }
 
-  public static async forward(opts: ForwardOptions): Promise<ProviderForwardResult> {
+  public static async forward(opts: ForwardOptions, selection?: ProviderSelection): Promise<ProviderForwardResult> {
     const maxAttempts = Math.max(1, Math.min(parseInt(getSetting('gateway_max_provider_attempts', '3'), 10), 10));
     const tried: number[] = [];
     let lastError: any = null;
+    const pinnedOrder = selection?.providerIds && selection.providerIds.length > 0 ? selection.providerIds : null;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const candidates = ProviderSelector.candidates(tried);
-      const provider = candidates[0] || this.available().find((p) => !tried.includes(p.id)) || null;
+      let provider: ProviderRow | null;
+
+      if (pinnedOrder) {
+        // Model-routed request: only the providers that actually host this model,
+        // in the operator-defined order.
+        const allowed = new Set(pinnedOrder);
+        const pool = this.available().filter((p) => allowed.has(p.id) && !tried.includes(p.id));
+        pool.sort((a, b) => pinnedOrder.indexOf(a.id) - pinnedOrder.indexOf(b.id));
+        provider = pool[0] || null;
+      } else {
+        const candidates = ProviderSelector.candidates(tried);
+        provider = candidates[0] || this.available().find((p) => !tried.includes(p.id)) || null;
+      }
+
       if (!provider) break;
       tried.push(provider.id);
 
+      // Apply the per-provider model name when the request was model-routed.
+      const modelOverride = selection?.modelByProvider?.[provider.id];
+      const forwardOpts: ForwardOptions =
+        modelOverride && opts.body && typeof opts.body === 'object'
+          ? { ...opts, body: { ...opts.body, model: modelOverride } }
+          : opts;
+
       try {
         const forwarded = await UpstreamClient.forward({
-          ...opts,
+          ...forwardOpts,
           baseUrl: provider.base_url,
           apiKey: ProviderRegistry.resolveApiKey(provider)
         });
@@ -78,7 +105,9 @@ export class ProviderRouter {
         if (forwarded.statusCode >= 500) {
           // Only fail over if there is actually another provider to try.
           // Otherwise the caller decides (pass-through vs egress rotation).
-          const remaining = ProviderSelector.candidates(tried);
+          const remaining = pinnedOrder
+            ? this.available().filter((p) => pinnedOrder.includes(p.id) && !tried.includes(p.id))
+            : ProviderSelector.candidates(tried);
           if (remaining.length === 0) {
             ProviderSelector.recordFailure(provider.id, 'server', forwarded.statusCode);
             return { forwarded, provider, attempts: attempt };
@@ -91,6 +120,23 @@ export class ProviderRouter {
           forwarded.cleanup();
           ProviderSelector.recordFailure(provider.id, 'server', forwarded.statusCode);
           continue;
+        }
+
+        // A model-routed request may hit a provider that does not actually host
+        // the model (404). That is a routing miss, not a client error: try the
+        // next mapped provider.
+        if (pinnedOrder && forwarded.statusCode === 404) {
+          const remaining = this.available().filter((p) => pinnedOrder.includes(p.id) && !tried.includes(p.id));
+          if (remaining.length > 0) {
+            try {
+              await UpstreamClient.readAll(forwarded.body);
+            } catch {
+              /* ignore */
+            }
+            forwarded.cleanup();
+            ProviderSelector.recordFailure(provider.id, 'model_missing', 404);
+            continue;
+          }
         }
 
         if (forwarded.statusCode === 429) {

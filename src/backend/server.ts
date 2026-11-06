@@ -12,6 +12,7 @@ import { BulkPrescreener } from './tester/bulk-prescreener';
 import { HealthMonitor } from './tester/health-monitor';
 import { egressPool } from './vpn/egress-pool';
 import { Doctor } from './doctor';
+import { ModelRouter } from './gateway/model-router';
 import { KeyManager } from './gateway/key-manager';
 import { UpstreamClient } from './gateway/upstream-client';
 import { createGatewayRouter } from './gateway/openai-router';
@@ -658,6 +659,8 @@ const SETTING_WHITELIST = new Set([
   'gateway_rotate_on_5xx',
   'gateway_upstream_bypass_proxy_loopback',
   'gateway_stream_include_usage',
+  'egress_policy',
+  'gateway_require_model_route',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',
@@ -775,6 +778,43 @@ app.patch('/api/providers/:id', (req: Request, res: Response) => {
 app.delete('/api/providers/:id', (req: Request, res: Response) => {
   const ok = ProviderRegistry.remove(parseInt(String(req.params.id), 10));
   res.status(ok ? 200 : 404).json({ success: ok });
+});
+
+// ---------------------------------------------------------------------------
+// Model routing: public alias -> (provider, upstream model)
+// ---------------------------------------------------------------------------
+app.get('/api/models', (req: Request, res: Response) => {
+  res.json({
+    require_route: ModelRouter.requireRoute(),
+    routes: ModelRouter.describe(),
+    raw: ModelRouter.list(),
+    providers: ProviderRegistry.list().map((p) => ({ id: p.id, name: p.name, model: p.model }))
+  });
+});
+
+app.post('/api/models', (req: Request, res: Response) => {
+  try {
+    const route = ModelRouter.create({
+      alias: req.body?.alias,
+      providerId: parseInt(String(req.body?.providerId ?? req.body?.provider_id), 10),
+      upstreamModel: req.body?.upstreamModel ?? req.body?.upstream_model,
+      priority: req.body?.priority,
+      enabled: req.body?.enabled
+    });
+    res.json({ success: true, route });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'could not create route' });
+  }
+});
+
+app.delete('/api/models/:id', (req: Request, res: Response) => {
+  const ok = ModelRouter.remove(parseInt(String(req.params.id), 10));
+  res.status(ok ? 200 : 404).json({ success: ok });
+});
+
+app.delete('/api/models/alias/:alias', (req: Request, res: Response) => {
+  const removed = ModelRouter.removeAlias(String(req.params.alias));
+  res.status(removed > 0 ? 200 : 404).json({ success: removed > 0, removed });
 });
 
 // ---------------------------------------------------------------------------

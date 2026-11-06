@@ -101,6 +101,26 @@ export function runMigrations(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_provider_events_time ON provider_events(provider_id, created_at);
 
+    -- ------------------------------------------------------------------
+    -- Model routing: public alias -> (provider, upstream model name)
+    --
+    -- Without this the client's "model" string is forwarded verbatim to whichever
+    -- provider the policy picked, and a provider that does not host that model
+    -- answers 4xx. An alias makes the mapping explicit and lets one alias resolve
+    -- to different upstream names per provider.
+    -- ------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS model_routes (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      alias          TEXT NOT NULL,
+      provider_id    INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+      upstream_model TEXT NOT NULL,
+      priority       INTEGER NOT NULL DEFAULT 100,
+      enabled        INTEGER NOT NULL DEFAULT 1,
+      created_at     TEXT DEFAULT (datetime('now')),
+      UNIQUE(alias, provider_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_model_routes_alias ON model_routes(alias, enabled);
+
     -- NOTE: model_prices is owned by service-migrations (canonical columns
     -- input_per_1m / output_per_1m). Do not create it here.
   `);
@@ -176,7 +196,10 @@ export function runMigrations(db: Database.Database): void {
     // D4/D5
     gateway_provider_policy: 'priority',       // priority | cost | round_robin
     gateway_max_provider_attempts: '3',
-    gateway_freshness_weight: '0.2'
+    gateway_freshness_weight: '0.2',
+    // Routing
+    egress_policy: 'sticky',                   // sticky | round_robin | least_loaded | random
+    gateway_require_model_route: 'false'       // true => unknown model is a 404, never a passthrough
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {
