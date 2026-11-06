@@ -52,7 +52,7 @@ function pickCandidate(excludeId: number | null): any | null {
         WHERE last_status = 'working'
           AND (? IS NULL OR id != ?)
         ORDER BY COALESCE(health_score, 100) DESC, COALESCE(last_latency_ms, 9999) ASC
-        LIMIT 25`
+        LIMIT 200`
     )
     .all(excludeId, excludeId) as any[];
 

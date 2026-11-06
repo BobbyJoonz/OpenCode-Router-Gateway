@@ -6,7 +6,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)
 ![API](https://img.shields.io/badge/API-OpenAI--compatible-purple.svg)
-![Tests](https://img.shields.io/badge/integration%20tests-51%20passing-success.svg)
+![Tests](https://img.shields.io/badge/integration%20tests-53%20passing-success.svg)
 
 **An OpenAI-compatible API gateway whose egress IP rotates.**
 
@@ -454,7 +454,7 @@ daily quota, usage accounting, client abort mid-stream, bulk pre-screen (includi
 the concurrent-run 409), health endpoint, and a **proof that traffic really goes
 through Xray** (a loopback upstream is unreachable when the bypass is disabled).
 
-Result on this machine: **51 passed, 0 failed**.
+Result on this machine: **53 passed, 0 failed**.
 
 ---
 
