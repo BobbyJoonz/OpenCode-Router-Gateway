@@ -71,6 +71,46 @@ page, readiness/drain and a legal baseline.
 
 ---
 
+## [2.3.0] — Operability and a compiled runtime
+
+Closes the five gaps left by 2.2 and removes the TypeScript runtime from
+production.
+
+### Added
+
+- **Prometheus metrics** at `GET /metrics` (no dependency): uptime, RSS/heap, pool
+  slots/capacity/in-flight, rotations/failovers, request counters by status, a
+  latency histogram, token and cost counters, db/WAL size, usage rows, retention
+  deletions. Rendered in the text exposition format, so any scraper works.
+- **Out-of-band alerts** (`service/notifier.ts`): generic JSON webhook and the
+  Telegram Bot API, with an 8 s timeout, a per-key cooldown, a bounded history and
+  optional proxy support (`ALERT_PROXY_URL`). Endpoints: `GET /api/alerts/status`,
+  `POST /api/alerts/test`. A monitor turns storage pressure and pool degradation
+  into alerts; an alerting failure never breaks serving.
+- **Timezone-aware retention**: `retention_timezone=local|utc` — "90 days" now
+  follows the server's calendar by default while still comparing against
+  UTC-stored rows.
+- **Configurable pool ceiling**: `pool_max_size` (default 16, hard cap 32) and a
+  **memory guard** (`pool_max_rss_mb`, default 512) that refuses to spawn another
+  Xray child instead of letting the host OOM.
+- **Compiled runtime**: `npm run build:server` emits `dist/`, `npm run start:prod`
+  runs it. All path resolution moved to `src/backend/paths.ts` (root discovered by
+  walking up to `package.json`), so the same code works under `tsx` and `node dist`.
+
+### Changed
+
+- systemd and Docker now execute `dist/backend/server.js`; `tsx` is a dev tool.
+- Measured effect: the serving process dropped from **~132 MB across two node
+  processes** (npx + tsx) to **~65–83 MB in one process**, with a faster start.
+
+### Tests
+
+- `tests/ops-tests.ts` — 27 assertions: metric series present and free of
+  `NaN`/`undefined`, alert disabled/enabled/cooldown/unreachable-webhook paths,
+  retention timezone modes, oversized pool clamp and resize.
+
+---
+
 ## [2.2.0] — Bounded resources
 
 Makes long-running deployments safe: the database can no longer grow without

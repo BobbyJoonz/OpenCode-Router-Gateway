@@ -5,6 +5,7 @@ import net from 'net';
 import { db, getSetting } from '../db/database';
 import { XrayConfigBuilder } from './xray-config-builder';
 import { safeWriteSensitiveFile, ensureSecureDirectory } from '../security/file-guard';
+import { PROJECT_ROOT } from '../paths';
 
 export interface ActiveConfigInfo {
   id: number;
@@ -30,7 +31,7 @@ export class VpnEngine {
   private isTestingMode: boolean = false;
 
   private constructor() {
-    const projectRoot = path.resolve(__dirname, '../../../');
+    const projectRoot = PROJECT_ROOT;
     const isWin = process.platform === 'win32';
     const binName = isWin ? 'xray.exe' : 'xray';
     this.binPath = process.env.XRAY_BIN || path.join(projectRoot, 'bin', binName);

@@ -20,7 +20,8 @@ WorkingDirectory=/opt/opencode-router
 EnvironmentFile=/opt/opencode-router/.env
 # Cap the heap so a leak fails fast instead of OOM-killing the host.
 Environment=NODE_OPTIONS=--max-old-space-size=512
-ExecStart=/opt/opencode-router/node_modules/.bin/tsx src/backend/server.ts
+# Compiled output: no tsx/transpiler at runtime (lower RAM, faster start).
+ExecStart=/usr/bin/node /opt/opencode-router/dist/backend/server.js
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

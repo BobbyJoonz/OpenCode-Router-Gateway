@@ -59,7 +59,7 @@ function main(): void {
       usageRetentionDays: 90,
       testHistoryRetentionDays: 30,
       usageMaxRows: 0,
-      vacuumThreshold: 999999
+      vacuumThreshold: 999999, timezone: 'utc'
     });
 
     const remaining = (db.prepare('SELECT COUNT(*) c FROM usage_log').get() as any).c;
@@ -79,7 +79,7 @@ function main(): void {
       usageRetentionDays: 0,
       testHistoryRetentionDays: 0,
       usageMaxRows: 100,
-      vacuumThreshold: 999999
+      vacuumThreshold: 999999, timezone: 'utc'
     });
 
     const remaining = (db.prepare('SELECT COUNT(*) c FROM usage_log').get() as any).c;
@@ -103,7 +103,7 @@ function main(): void {
       usageRetentionDays: 1,
       testHistoryRetentionDays: 1,
       usageMaxRows: 1,
-      vacuumThreshold: 999999
+      vacuumThreshold: 999999, timezone: 'utc'
     });
 
     check('configs preserved', (db.prepare('SELECT COUNT(*) c FROM configs').get() as any).c === 1);
@@ -123,7 +123,7 @@ function main(): void {
       usageRetentionDays: 0,
       testHistoryRetentionDays: 30,
       usageMaxRows: 0,
-      vacuumThreshold: 999999
+      vacuumThreshold: 999999, timezone: 'utc'
     });
 
     check('old history deleted', result.deletedHistory === 1, String(result.deletedHistory));
@@ -136,7 +136,7 @@ function main(): void {
   console.log('\n▶ Idempotency and safety');
   {
     const db = makeDb();
-    const opts = { usageRetentionDays: 30, testHistoryRetentionDays: 30, usageMaxRows: 10, vacuumThreshold: 999999 };
+    const opts = { usageRetentionDays: 30, testHistoryRetentionDays: 30, usageMaxRows: 10, vacuumThreshold: 999999, timezone: 'utc' as const };
     const first = applyRetention(db, opts);
     const second = applyRetention(db, opts);
     check('empty database is a no-op', first.deletedUsage === 0 && second.deletedUsage === 0);
@@ -145,7 +145,7 @@ function main(): void {
     // retention disabled means "keep everything"
     const db2 = makeDb();
     for (let i = 0; i < 5; i++) db2.prepare("INSERT INTO usage_log (created_at) VALUES (datetime('now','-999 days'))").run();
-    applyRetention(db2, { usageRetentionDays: 0, testHistoryRetentionDays: 0, usageMaxRows: 0, vacuumThreshold: 999999 });
+    applyRetention(db2, { usageRetentionDays: 0, testHistoryRetentionDays: 0, usageMaxRows: 0, vacuumThreshold: 999999, timezone: 'utc' });
     check('retention 0 keeps everything', (db2.prepare('SELECT COUNT(*) c FROM usage_log').get() as any).c === 5);
     db.close();
     db2.close();

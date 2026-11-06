@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from '../db/database';
+import { Metrics } from '../metrics';
 
 export interface ApiKeyRow {
   id: number;
@@ -207,6 +208,11 @@ export class KeyManager {
     error?: string | null;
   }): void {
     try {
+      // Feed Prometheus counters from the single accounting choke point, so
+      // streaming and non-streaming paths are both covered.
+      Metrics.recordUsage(params.promptTokens, params.completionTokens, params.costUsd ?? 0);
+      Metrics.recordRequest(params.statusCode, params.latencyMs);
+
       db.prepare(
         `INSERT INTO usage_log
            (key_id, model, prompt_tokens, completion_tokens, total_tokens,

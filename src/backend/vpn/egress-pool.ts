@@ -1,6 +1,7 @@
 import { db, getSetting } from '../db/database';
 import { XraySlot, SlotConfigRow, isValidConfigRow } from './xray-slot';
 import path from 'path';
+import { DATA_DIR, PROJECT_ROOT } from '../paths';
 
 /** Loopback / link-local endpoints can never be a real egress. */
 export function isRoutableEgressAddress(address: string): boolean {
@@ -91,7 +92,7 @@ export class EgressPool {
     startFailures: 0,
     totalStartMs: 0
   };
-  private dataDir = path.resolve(__dirname, '../../../data');
+  private dataDir = DATA_DIR;
 
   public static getInstance(): EgressPool {
     if (!this.instance) this.instance = new EgressPool();
@@ -109,7 +110,10 @@ export class EgressPool {
   }
 
   public init(size?: number): void {
-    const configured = Math.max(1, Math.min(size ?? (parseInt(getSetting('pool_size', '2'), 10) || 2), 8));
+    // Upper bound is configurable (each slot is ~22 MB RSS); hard-capped at 32 so
+    // a typo cannot fork-bomb the host.
+    const maxSize = Math.max(1, Math.min(parseInt(getSetting('pool_max_size', '16'), 10) || 16, 32));
+    const configured = Math.max(1, Math.min(size ?? (parseInt(getSetting('pool_size', '2'), 10) || 2), maxSize));
     if (this.size === configured && this.slots.length === configured) return;
 
     this.stopWatchdog();
@@ -310,6 +314,18 @@ export class EgressPool {
 
   private async startSlot(slot: XraySlot, row: SlotConfigRow): Promise<StartResult> {
     const t0 = Date.now();
+
+    // Memory guard: refuse to spawn another Xray child when the process is
+    // already near its ceiling, so the pool degrades instead of OOM-killing.
+    const maxRssMb = Math.max(64, parseInt(getSetting('pool_max_rss_mb', '512'), 10));
+    const rssMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    if (rssMb > maxRssMb) {
+      this.metrics.startFailures++;
+      const error = `memory guard: rss ${rssMb}MB > ${maxRssMb}MB`;
+      this.recordEvent(slot.index, 'error', error, row.id);
+      return { ok: false, ms: Date.now() - t0, error };
+    }
+
     this.metrics.starts++;
     const ok = await slot.start(row);
     const ms = Date.now() - t0;
@@ -449,7 +465,7 @@ export class EgressPool {
   }
 
   private resolveBinary(): string {
-    const projectRoot = path.resolve(__dirname, '../../../');
+    const projectRoot = PROJECT_ROOT;
     const isWin = process.platform === 'win32';
     const candidates = [
       process.env.XRAY_BIN || '',

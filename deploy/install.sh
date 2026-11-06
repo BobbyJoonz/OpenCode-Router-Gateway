@@ -68,6 +68,9 @@ npm rebuild better-sqlite3 >/dev/null 2>&1 || warn "better-sqlite3 rebuild faile
 log "Building frontend"
 ( cd "${APP_DIR}/src/frontend" && npx vite build )
 
+log "Compiling backend to dist/"
+( cd "${APP_DIR}" && npx tsc -p tsconfig.build.json )
+
 # ---------------------------------------------------------------- xray
 if [[ ! -x "${APP_DIR}/bin/xray" ]]; then
   log "Downloading Xray-core ${XRAY_VERSION}"

@@ -13,6 +13,8 @@ import { HealthMonitor } from './tester/health-monitor';
 import { egressPool } from './vpn/egress-pool';
 import { Doctor } from './doctor';
 import { RetentionService } from './service/retention';
+import { Metrics } from './metrics';
+import { Notifier } from './service/notifier';
 import { ModelRouter } from './gateway/model-router';
 import { KeyManager } from './gateway/key-manager';
 import { UpstreamClient } from './gateway/upstream-client';
@@ -35,6 +37,7 @@ import {
   maskAddress,
   sanitizeSubscriptionUrl
 } from './security/api-guard';
+import { FRONTEND_DIST } from './paths';
 
 export const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -106,6 +109,9 @@ if (isDirectRun) {
   // Bounded growth: prune usage history and reclaim space on a timer.
   RetentionService.start();
 
+  // Out-of-band alerting: storage pressure and pool capacity changes.
+  startAlertMonitor();
+
   // Serving pool: N independent Xray slots with a watchdog for automatic failover.
   egressPool.init();
   egressPool
@@ -128,6 +134,11 @@ if (isDirectRun) {
     }
     try {
       RetentionService.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      stopAlertMonitor();
     } catch {
       /* ignore */
     }
@@ -476,6 +487,97 @@ app.get('/api/diagnostics', (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// Alert monitor: turns storage/pool problems into out-of-band notifications.
+// Every failure here is swallowed — alerting must never break serving.
+// ---------------------------------------------------------------------------
+// Declared with ar on purpose: startAlertMonitor() is called during module
+// initialization, before this line would be reached in a let binding (TDZ).
+var alertTimer: NodeJS.Timeout | null = null;
+
+function startAlertMonitor(): void {
+  if (alertTimer) return;
+
+  const tick = async () => {
+    try {
+      if (getSetting('alerts_enabled', 'false') !== 'true') return;
+      if (!Notifier.isConfigured()) return;
+
+      const storage = RetentionService.stats();
+      if (!storage.healthy) {
+        await Notifier.send('storage', `Storage warning: ${storage.warnings.join('; ')}`, 'warning');
+      }
+
+      const pool = egressPool.status();
+      if (pool.capacity === 'none') {
+        await Notifier.send('pool', `Egress pool has no ready slot. ${pool.capacityNote}`, 'critical');
+      } else if (pool.capacity === 'reduced') {
+        await Notifier.send('pool', `Egress pool reduced. ${pool.capacityNote}`, 'warning');
+      }
+    } catch (err: any) {
+      console.error('[Alerts] check failed:', err?.message || err);
+    }
+  };
+
+  const seconds = Math.max(30, parseInt(getSetting('alert_check_interval_seconds', '300'), 10));
+  alertTimer = setInterval(() => void tick(), seconds * 1000);
+  alertTimer.unref?.();
+}
+
+function stopAlertMonitor(): void {
+  if (alertTimer) {
+    clearInterval(alertTimer);
+    alertTimer = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Prometheus metrics (management surface, loopback by default)
+// ---------------------------------------------------------------------------
+app.get('/metrics', (req: Request, res: Response) => {
+  const pool = egressPool.status();
+  const storage = RetentionService.stats();
+  const lastRun = RetentionService.getLastRun();
+  const body = Metrics.render({
+    poolSize: pool.size,
+    poolReady: pool.ready,
+    poolInFlight: pool.slots.reduce((sum: number, s: any) => sum + (s.inFlight || 0), 0),
+    poolCapacity: pool.capacity,
+    dbBytes: storage.dbBytes,
+    walBytes: storage.walBytes,
+    usageRows: storage.usageRows,
+    retentionDeletedTotal: (lastRun?.deletedUsage || 0) + (lastRun?.deletedHistory || 0),
+    rotations: pool.metrics.rotations,
+    failovers: pool.metrics.failovers
+  });
+  res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+  res.send(body);
+});
+
+// ---------------------------------------------------------------------------
+// Alerts (out-of-band notifications)
+// ---------------------------------------------------------------------------
+app.get('/api/alerts/status', (req: Request, res: Response) => {
+  res.json({
+    enabled: getSetting('alerts_enabled', 'false') === 'true',
+    configured: Notifier.isConfigured(),
+    channels: {
+      webhook: !!(process.env.ALERT_WEBHOOK_URL || getSetting('alert_webhook_url', '')),
+      telegram: !!(
+        process.env.ALERT_TELEGRAM_BOT_TOKEN &&
+        (process.env.ALERT_TELEGRAM_CHAT_ID || getSetting('alert_telegram_chat_id', ''))
+      )
+    },
+    history: Notifier.getHistory()
+  });
+});
+
+app.post('/api/alerts/test', async (req: Request, res: Response) => {
+  const message = String(req.body?.message || 'Test alert from OpenCode Router Gateway');
+  const result = await Notifier.send('test', message, 'info');
+  res.json({ success: result.sent, result });
+});
+
+// ---------------------------------------------------------------------------
 // Storage / retention (bounded growth)
 // ---------------------------------------------------------------------------
 app.get('/api/retention/status', (req: Request, res: Response) => {
@@ -704,6 +806,14 @@ const SETTING_WHITELIST = new Set([
   'retention_interval_seconds',
   'retention_vacuum_threshold',
   'xray_log_max_bytes',
+  'retention_timezone',
+  'pool_max_size',
+  'pool_max_rss_mb',
+  'alerts_enabled',
+  'alert_webhook_url',
+  'alert_telegram_chat_id',
+  'alert_cooldown_seconds',
+  'alert_check_interval_seconds',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',
@@ -916,7 +1026,7 @@ app.post('/api/freshness/recompute', (req: Request, res: Response) => {
 });
 
 // Serve static frontend files if built
-const frontendDist = path.resolve(__dirname, '../frontend/dist');
+const frontendDist = FRONTEND_DIST;
 if (fs.existsSync(frontendDist)) {
   app.use(express.static(frontendDist));
   app.use((req: Request, res: Response) => {

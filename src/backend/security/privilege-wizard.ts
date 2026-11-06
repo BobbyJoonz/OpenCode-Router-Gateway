@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import path from 'path';
 import fs from 'fs';
+import { PROJECT_ROOT } from '../paths';
 
 export interface PrivilegeStatus {
   localProxyReady: boolean;
@@ -12,7 +13,7 @@ export interface PrivilegeStatus {
 
 export class PrivilegeWizard {
   public static checkStatus(): PrivilegeStatus {
-    const projectRoot = path.resolve(__dirname, '../../../');
+    const projectRoot = PROJECT_ROOT;
     const isWin = process.platform === 'win32';
     const xrayBin = path.join(projectRoot, 'bin', isWin ? 'xray.exe' : 'xray');
     const setupScriptPath = isWin ? '' : path.join(projectRoot, 'scripts', 'setup-privileges.sh');

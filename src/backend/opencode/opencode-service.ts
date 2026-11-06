@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import { ErrorClassifier, ClassificationResult } from './error-classifier';
 import { getSetting } from '../db/database';
+import { PROJECT_ROOT } from '../paths';
 
 export interface OpenCodeInfo {
   installed: boolean;
@@ -20,7 +21,7 @@ export class OpenCodeService {
   private readonly isWin = process.platform === 'win32';
 
   private constructor() {
-    const projectRoot = path.resolve(__dirname, '../../../');
+    const projectRoot = PROJECT_ROOT;
     this.launcherPath = path.join(projectRoot, 'bin', this.isWin ? 'opencode-vpn.cmd' : 'opencode-vpn');
 
     this.resolveBinaryPath();

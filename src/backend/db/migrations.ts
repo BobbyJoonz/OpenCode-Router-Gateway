@@ -209,7 +209,17 @@ export function runMigrations(db: Database.Database): void {
     db_max_mb: '512',
     retention_interval_seconds: '3600',
     retention_vacuum_threshold: '5000',         // rows deleted before a VACUUM is worth it
-    xray_log_max_bytes: '5242880'
+    xray_log_max_bytes: '5242880',
+    retention_timezone: 'local',                // local | utc
+    // Pool sizing / memory guard
+    pool_max_size: '16',
+    pool_max_rss_mb: '512',
+    // Alerts (out-of-band notifications)
+    alerts_enabled: 'false',
+    alert_webhook_url: '',
+    alert_telegram_chat_id: '',
+    alert_cooldown_seconds: '900',
+    alert_check_interval_seconds: '300'
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

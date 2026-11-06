@@ -25,7 +25,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
 COPY . .
-RUN npm run build:frontend
+RUN npm run build
 
 # Drop dev-only packages but keep the compiled frontend.
 RUN npm prune --omit=dev --no-audit --no-fund
@@ -62,6 +62,7 @@ RUN set -eux; \
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/src ./src
+COPY --from=build /app/dist ./dist
 COPY --from=build /app/tests ./tests
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/tsconfig.json ./tsconfig.json
@@ -73,4 +74,4 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -fsS http://127.0.0.1:3000/v1/health || exit 1
 
-CMD ["node", "--max-old-space-size=512", "node_modules/tsx/dist/cli.mjs", "src/backend/server.ts"]
+CMD ["node", "--max-old-space-size=512", "dist/backend/server.js"]

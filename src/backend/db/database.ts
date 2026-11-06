@@ -2,8 +2,9 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { runMigrations } from './migrations';
+import { DATA_DIR } from '../paths';
 
-const DB_DIR = path.resolve(__dirname, '../../../data');
+const DB_DIR = DATA_DIR;
 if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
 }

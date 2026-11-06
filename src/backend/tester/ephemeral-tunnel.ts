@@ -6,6 +6,7 @@ import crypto from 'crypto';
 import { XrayConfigBuilder } from '../vpn/xray-config-builder';
 import { LatencyTester } from './latency-tester';
 import { safeWriteSensitiveFile } from '../security/file-guard';
+import { DATA_DIR, PROJECT_ROOT } from '../paths';
 
 export interface ProbeRow {
   id: number;
@@ -44,7 +45,7 @@ export class EphemeralTunnelTester {
   public static resolveBinary(): string {
     if (this.binaryPath) return this.binaryPath;
 
-    const projectRoot = path.resolve(__dirname, '../../../');
+    const projectRoot = PROJECT_ROOT;
     const isWin = process.platform === 'win32';
     const candidates = [
       process.env.XRAY_BIN || '',
@@ -69,7 +70,7 @@ export class EphemeralTunnelTester {
     if (this.swept) return;
     this.swept = true;
     try {
-      const dataDir = path.resolve(__dirname, '../../../data');
+      const dataDir = DATA_DIR;
       if (!fs.existsSync(dataDir)) return;
       const now = Date.now();
       for (const name of fs.readdirSync(dataDir)) {
@@ -111,7 +112,7 @@ export class EphemeralTunnelTester {
     this.busy = true;
 
     const startedAt = Date.now();
-    const dataDir = path.resolve(__dirname, '../../../data');
+    const dataDir = DATA_DIR;
     const cfgPath = path.join(dataDir, `probe-${crypto.randomBytes(6).toString('hex')}.json`);
     let child: ChildProcess | null = null;
 

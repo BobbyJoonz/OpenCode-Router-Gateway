@@ -2,12 +2,19 @@ import fs from 'fs';
 import path from 'path';
 import type Database from 'better-sqlite3';
 import { db, getSetting } from '../db/database';
+import { DATA_DIR } from '../paths';
 
 export interface RetentionOptions {
   usageRetentionDays: number;
   testHistoryRetentionDays: number;
   usageMaxRows: number;
   vacuumThreshold: number;
+  /**
+   * `local` measures "90 days" against the server's local calendar (what an
+   * operator expects), converting the cutoff back to UTC because rows are stored
+   * in UTC. `utc` keeps the raw UTC behaviour.
+   */
+  timezone: 'local' | 'utc';
 }
 
 export interface RetentionResult {
@@ -37,7 +44,6 @@ export interface StorageStats {
   warnings: string[];
 }
 
-const DATA_DIR = path.resolve(__dirname, '../../../data');
 const DB_PATH = path.join(DATA_DIR, 'opencode-vpn.db');
 
 function fileSize(file: string): number {
@@ -67,14 +73,16 @@ export function applyRetention(handle: Database.Database, opts: RetentionOptions
   let deletedPrescreenRuns = 0;
 
   // 1) age-based pruning
+  const cutoff = opts.timezone === 'local' ? `datetime('now','localtime', ?, 'utc')` : `datetime('now', ?)`;
+
   if (opts.usageRetentionDays > 0) {
     deletedUsage += handle
-      .prepare(`DELETE FROM usage_log WHERE created_at < datetime('now', ?)`)
+      .prepare(`DELETE FROM usage_log WHERE created_at < ${cutoff}`)
       .run(`-${opts.usageRetentionDays} days`).changes;
   }
   if (opts.testHistoryRetentionDays > 0) {
     deletedHistory += handle
-      .prepare(`DELETE FROM test_history WHERE timestamp < datetime('now', ?)`)
+      .prepare(`DELETE FROM test_history WHERE timestamp < ${cutoff}`)
       .run(`-${opts.testHistoryRetentionDays} days`).changes;
   }
 
@@ -142,7 +150,8 @@ export class RetentionService {
       usageRetentionDays: parseInt(getSetting('usage_retention_days', '90'), 10),
       testHistoryRetentionDays: parseInt(getSetting('test_history_retention_days', '30'), 10),
       usageMaxRows: parseInt(getSetting('usage_max_rows', '500000'), 10),
-      vacuumThreshold: parseInt(getSetting('retention_vacuum_threshold', '5000'), 10)
+      vacuumThreshold: parseInt(getSetting('retention_vacuum_threshold', '5000'), 10),
+      timezone: getSetting('retention_timezone', 'local') === 'utc' ? 'utc' : 'local'
     };
   }
 
