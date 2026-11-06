@@ -80,17 +80,57 @@ const orchestrator = ConnectionOrchestrator.getInstance();
 const vpn = VpnEngine.getInstance();
 const opencode = OpenCodeService.getInstance();
 
-// Background health monitor (no-op when disabled in settings).
-HealthMonitor.start();
+// ---------------------------------------------------------------------------
+// Process bootstrap.
+//
+// IMPORTANT: this block must only run when the file is the *entry point*.
+// `tests/*` import this module to reuse `startServer()`; running the bootstrap
+// unconditionally made a test run spawn the whole egress pool (4 Xray children),
+// which then kept the Node event loop alive and left orphan processes behind.
+// ---------------------------------------------------------------------------
+const isDirectRun = (() => {
+  try {
+    return require.main === module;
+  } catch {
+    return false;
+  }
+})();
 
-// Serving pool: N independent Xray slots with a watchdog for automatic failover.
-egressPool.init();
-egressPool
-  .ensureAll()
-  .then((started) => {
-    if (started > 0) console.log(`[EgressPool] started ${started} slot(s)`);
-  })
-  .catch((err) => console.error('[EgressPool] init failed:', err?.message || err));
+if (isDirectRun) {
+  // Background health monitor (no-op when disabled in settings).
+  HealthMonitor.start();
+
+  // Serving pool: N independent Xray slots with a watchdog for automatic failover.
+  egressPool.init();
+  egressPool
+    .ensureAll()
+    .then((started) => {
+      if (started > 0) console.log(`[EgressPool] started ${started} slot(s)`);
+    })
+    .catch((err) => console.error('[EgressPool] init failed:', err?.message || err));
+
+  // Shut the pool down cleanly so no Xray child outlives the server.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Server] ${signal} received — shutting down`);
+    try {
+      HealthMonitor.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await egressPool.shutdown();
+    } catch (err: any) {
+      console.error('[Server] pool shutdown error:', err?.message || err);
+    }
+    process.exit(0);
+  };
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGHUP', () => void shutdown('SIGHUP'));
+}
 
 // Server-Sent Events (SSE) clients
 const sseClients: Set<Response> = new Set();

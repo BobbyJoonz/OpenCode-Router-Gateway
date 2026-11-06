@@ -23,8 +23,34 @@ export class ProviderRouter {
   public static available(): ProviderRow[] {
     const configured = ProviderRegistry.enabled().filter((provider) => ProviderRegistry.hasKey(provider));
     if (configured.length > 0) return configured;
-    const fallback = ProviderRegistry.envFallback();
-    return fallback ? [fallback] : [];
+
+    const envProvider = ProviderRegistry.envFallback();
+    if (envProvider) return [envProvider];
+
+    // Last resort: a single upstream configured through the settings API
+    // (`gateway_upstream_base_url`), which is how a 1.x deployment runs.
+    const config = UpstreamClient.resolveConfig();
+    if (config.baseUrl) {
+      return [
+        {
+          id: 0,
+          name: 'settings-fallback',
+          kind: 'openai',
+          base_url: config.baseUrl,
+          key_env: 'GATEWAY_UPSTREAM_API_KEY',
+          model: config.model || null,
+          priority: 1000,
+          cost_per_1m_in: 0,
+          cost_per_1m_out: 0,
+          rpm_limit: 0,
+          daily_usd_cap: 0,
+          enabled: 1,
+          created_at: new Date().toISOString()
+        }
+      ];
+    }
+
+    return [];
   }
 
   public static hasProviders(): boolean {
@@ -50,7 +76,13 @@ export class ProviderRouter {
         });
 
         if (forwarded.statusCode >= 500) {
-          // Drain and let another provider try.
+          // Only fail over if there is actually another provider to try.
+          // Otherwise the caller decides (pass-through vs egress rotation).
+          const remaining = ProviderSelector.candidates(tried);
+          if (remaining.length === 0) {
+            ProviderSelector.recordFailure(provider.id, 'server', forwarded.statusCode);
+            return { forwarded, provider, attempts: attempt };
+          }
           try {
             await UpstreamClient.readAll(forwarded.body);
           } catch {

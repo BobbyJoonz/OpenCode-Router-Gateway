@@ -32,12 +32,17 @@ export class FreshnessTracker {
 
   public static recordSuccess(nodeId: number): void {
     try {
-      db.prepare(
-        `UPDATE configs
-            SET success_streak = COALESCE(success_streak, 0) + 1,
-                freshness_score = ?
-          WHERE id = ?`
-      ).run(this.computeScore(nodeId, 1), nodeId);
+      const row = this.readCounters(nodeId);
+      if (!row) return;
+      // Compute from the *new* values: reading the row again after the UPDATE
+      // would score the previous state and never move.
+      const nextStreak = (row.success_streak || 0) + 1;
+      const score = this.scoreFrom(row.rate_limit_hits, nextStreak, row.requests_before_429);
+      db.prepare(`UPDATE configs SET success_streak = ?, freshness_score = ? WHERE id = ?`).run(
+        nextStreak,
+        score,
+        nodeId
+      );
     } catch (err: any) {
       console.error('[Freshness] recordSuccess failed:', err?.message || err);
     }
@@ -53,19 +58,21 @@ export class FreshnessTracker {
       if (!row) return;
 
       const streak = row.success_streak || 0;
-      // Only record the *first* useful measurement; a streak of 0 tells us nothing.
+      // Only record a useful measurement; a streak of 0 tells us nothing.
       const observed = row.requests_before_429;
       const nextObserved = streak > 0 ? (observed === null || observed === undefined ? streak : Math.round((observed + streak) / 2)) : observed;
+      const nextHits = (row.rate_limit_hits || 0) + 1;
+      const score = this.scoreFrom(nextHits, 0, nextObserved);
 
       db.prepare(
         `UPDATE configs
-            SET rate_limit_hits = COALESCE(rate_limit_hits, 0) + 1,
+            SET rate_limit_hits = ?,
                 success_streak = 0,
                 last_429_at = datetime('now'),
                 requests_before_429 = ?,
                 freshness_score = ?
           WHERE id = ?`
-      ).run(nextObserved, this.computeScore(nodeId, 0), nodeId);
+      ).run(nextHits, nextObserved, score, nodeId);
     } catch (err: any) {
       console.error('[Freshness] recordRateLimit failed:', err?.message || err);
     }
@@ -109,14 +116,17 @@ export class FreshnessTracker {
     return Math.max(0, Math.min(100, Math.round(score * 100) / 100));
   }
 
-  private static computeScore(nodeId: number, _delta: number): number {
+  private static readCounters(nodeId: number): {
+    rate_limit_hits: number | null;
+    success_streak: number | null;
+    requests_before_429: number | null;
+  } | null {
     const row = db
       .prepare('SELECT rate_limit_hits, success_streak, requests_before_429 FROM configs WHERE id = ?')
       .get(nodeId) as
       | { rate_limit_hits: number | null; success_streak: number | null; requests_before_429: number | null }
       | undefined;
-    if (!row) return 100;
-    return this.scoreFrom(row.rate_limit_hits, row.success_streak, row.requests_before_429);
+    return row || null;
   }
 
   public static snapshot(nodeId: number): FreshnessSnapshot | null {

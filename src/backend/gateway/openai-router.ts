@@ -5,6 +5,10 @@ import { UpstreamClient } from './upstream-client';
 import { classifyHttp, classifyNetwork, openAiError } from './error-mapper';
 import { egressPool } from '../vpn/egress-pool';
 import { XraySlot } from '../vpn/xray-slot';
+import { ProviderRouter } from './provider-router';
+import { FreshnessTracker } from '../tester/freshness';
+import { costOf, spendToday, spendThisMonth } from './cost';
+import { ProviderRow } from '../providers/provider-registry';
 
 interface GatewayRequest extends Request {
   apiKey?: ApiKeyRow;
@@ -128,6 +132,18 @@ export function createGatewayRouter(): Router {
       }
     }
 
+    // D5: dollar caps are the only limit that actually protects the operator.
+    const dailySpendCap = Number(verified.key.spend_cap_usd_daily) || 0;
+    const monthlySpendCap = Number(verified.key.spend_cap_usd_monthly) || 0;
+    if (dailySpendCap > 0 && spendToday(verified.key.id) >= dailySpendCap) {
+      res.status(429).json(openAiError('Daily spend cap exhausted for this API key.', 'rate_limit_error', 'daily_spend_cap_exceeded'));
+      return;
+    }
+    if (monthlySpendCap > 0 && spendThisMonth(verified.key.id) >= monthlySpendCap) {
+      res.status(429).json(openAiError('Monthly spend cap exhausted for this API key.', 'rate_limit_error', 'monthly_spend_cap_exceeded'));
+      return;
+    }
+
     req.apiKey = verified.key;
     next();
   };
@@ -136,17 +152,18 @@ export function createGatewayRouter(): Router {
   router.get('/models', authMiddleware, async (_req: GatewayRequest, res: Response) => {
     const config = UpstreamClient.resolveConfig();
 
-    if (config.baseUrl) {
+    if (ProviderRouter.hasProviders()) {
       const slot = await egressPool.acquire(null);
       if (slot) {
         egressPool.track(slot);
         try {
-          const forwarded = await UpstreamClient.forward({
+          const routed = await ProviderRouter.forward({
             method: 'GET',
             path: '/models',
             httpProxyPort: slot.httpPort,
             timeoutMs: 15000
           });
+          const forwarded = routed.forwarded;
           if (forwarded.statusCode >= 200 && forwarded.statusCode < 300) {
             const text = await UpstreamClient.readAll(forwarded.body);
             forwarded.cleanup();
@@ -245,14 +262,17 @@ export function createGatewayRouter(): Router {
       const nodeId = slot.node?.id ?? null;
 
       let forwarded;
+      let provider: ProviderRow | null = null;
       try {
-        forwarded = await UpstreamClient.forward({
+        const routed = await ProviderRouter.forward({
           method: 'POST',
           path: '/chat/completions',
           httpProxyPort: slot.httpPort,
           body: forwardBody,
           accept: wantsStream ? 'text/event-stream' : 'application/json'
         });
+        forwarded = routed.forwarded;
+        provider = routed.provider;
       } catch (err: any) {
         releaseOnce();
         const classification = classifyNetwork(err?.code);
@@ -280,12 +300,19 @@ export function createGatewayRouter(): Router {
 
       try {
         if (classification.class === 'ok') {
+          if (nodeId) FreshnessTracker.recordSuccess(nodeId);
+          const meta = { nodeId, provider };
           if (wantsStream) {
-            await pipeStream(req, res, forwarded, key, body, startedAt, nodeId);
+            await pipeStream(req, res, forwarded, key, body, startedAt, meta);
           } else {
-            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, nodeId);
+            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, meta);
           }
           return;
+        }
+
+        // D2: a 429 is a measurement about this egress IP.
+        if (classification.class === 'rate_limit' && nodeId) {
+          FreshnessTracker.recordRateLimit(nodeId);
         }
 
         // retryable: rotate this slot away and try again on a fresh one
@@ -340,7 +367,7 @@ async function relayJson(
   key: ApiKeyRow,
   body: any,
   startedAt: number,
-  nodeId: number | null
+  meta: { nodeId: number | null; provider: ProviderRow | null }
 ): Promise<void> {
   let text = '';
   try {
@@ -357,16 +384,21 @@ async function relayJson(
   }
 
   const usage = parsed?.usage || {};
+  const promptTokens = toNonNegativeInt(usage.prompt_tokens);
+  const completionTokens = toNonNegativeInt(usage.completion_tokens);
+  const modelName = parsed?.model || body.model || null;
   KeyManager.recordUsage({
     keyId: key.id,
-    model: parsed?.model || body.model || null,
-    promptTokens: toNonNegativeInt(usage.prompt_tokens),
-    completionTokens: toNonNegativeInt(usage.completion_tokens),
+    model: modelName,
+    promptTokens,
+    completionTokens,
     totalTokens: toNonNegativeInt(usage.total_tokens),
     statusCode,
     latencyMs: Date.now() - startedAt,
-    upstream: UpstreamClient.resolveConfig().baseUrl,
-    egressNodeId: nodeId
+    upstream: meta.provider?.base_url || UpstreamClient.resolveConfig().baseUrl,
+    egressNodeId: meta.nodeId,
+    providerId: meta.provider?.id ?? null,
+    costUsd: costOf(modelName, promptTokens, completionTokens)
   });
 
   if (parsed === null) {
@@ -383,7 +415,7 @@ async function pipeStream(
   key: ApiKeyRow,
   body: any,
   startedAt: number,
-  nodeId: number | null
+  meta: { nodeId: number | null; provider: ProviderRow | null }
 ): Promise<void> {
   res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -436,16 +468,21 @@ async function pipeStream(
   } finally {
     forwarded.cleanup();
     const usage = scanner.usage;
+    const promptTokens = toNonNegativeInt(usage.prompt_tokens);
+    const completionTokens = toNonNegativeInt(usage.completion_tokens);
+    const modelName = body.model || null;
     KeyManager.recordUsage({
       keyId: key.id,
-      model: body.model || null,
-      promptTokens: toNonNegativeInt(usage.prompt_tokens),
-      completionTokens: toNonNegativeInt(usage.completion_tokens),
+      model: modelName,
+      promptTokens,
+      completionTokens,
       totalTokens: toNonNegativeInt(usage.total_tokens),
       statusCode: clientClosed ? 499 : 200,
       latencyMs: Date.now() - startedAt,
-      upstream: UpstreamClient.resolveConfig().baseUrl,
-      egressNodeId: nodeId,
+      upstream: meta.provider?.base_url || UpstreamClient.resolveConfig().baseUrl,
+      egressNodeId: meta.nodeId,
+      providerId: meta.provider?.id ?? null,
+      costUsd: costOf(modelName, promptTokens, completionTokens),
       error: clientClosed ? 'client_closed' : null
     });
   }

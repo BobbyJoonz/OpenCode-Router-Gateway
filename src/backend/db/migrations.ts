@@ -101,15 +101,8 @@ export function runMigrations(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_provider_events_time ON provider_events(provider_id, created_at);
 
-    -- ------------------------------------------------------------------
-    -- D5: pricing and spend accounting
-    -- ------------------------------------------------------------------
-    CREATE TABLE IF NOT EXISTS model_prices (
-      model           TEXT PRIMARY KEY,
-      cost_per_1m_in  REAL NOT NULL DEFAULT 0,
-      cost_per_1m_out REAL NOT NULL DEFAULT 0,
-      updated_at      TEXT DEFAULT (datetime('now'))
-    );
+    -- NOTE: model_prices is owned by service-migrations (canonical columns
+    -- input_per_1m / output_per_1m). Do not create it here.
   `);
 
   // ---- additive columns on configs -------------------------------------
@@ -188,6 +181,26 @@ export function runMigrations(db: Database.Database): void {
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {
     insertSetting.run(k, v);
+  }
+
+  // Repair: an earlier revision created model_prices with cost_per_1m_* columns
+  // while the runtime reads input_per_1m/output_per_1m. Add + backfill so both
+  // fresh and upgraded databases agree.
+  try {
+    const priceCols = new Set(
+      (db.prepare('PRAGMA table_info(model_prices)').all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (priceCols.size > 0 && !priceCols.has('input_per_1m')) {
+      db.exec('ALTER TABLE model_prices ADD COLUMN input_per_1m REAL NOT NULL DEFAULT 0');
+      db.exec('ALTER TABLE model_prices ADD COLUMN output_per_1m REAL NOT NULL DEFAULT 0');
+      if (priceCols.has('cost_per_1m_in')) {
+        db.exec(
+          'UPDATE model_prices SET input_per_1m = COALESCE(cost_per_1m_in, 0), output_per_1m = COALESCE(cost_per_1m_out, 0)'
+        );
+      }
+    }
+  } catch {
+    // best effort
   }
 
   // Mark prescreen runs that were interrupted by a crash as aborted.

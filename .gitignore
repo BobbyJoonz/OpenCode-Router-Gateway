@@ -55,3 +55,6 @@ data/active-connection.json
 # OS Metadata
 .DS_Store
 Thumbs.db
+
+# Rotation experiment output
+tools/rotation-experiment/results/

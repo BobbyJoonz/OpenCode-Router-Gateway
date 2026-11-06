@@ -22,12 +22,13 @@
                     "typecheck":  "tsc --noEmit",
                     "test":  "npx tsx tests/test-scenarios.ts",
                     "test:gateway":  "npx tsx tests/gateway-tests.ts",
-                    "test:all":  "npm run typecheck \u0026\u0026 npm test \u0026\u0026 npm run test:gateway \u0026\u0026 npm run test:service",
+                    "test:all":  "npm run typecheck \u0026\u0026 npm test \u0026\u0026 npm run test:side-effects \u0026\u0026 npm run test:gateway \u0026\u0026 npm run test:service",
                     "docs:dev":  "vitepress dev docs",
                     "docs:build":  "vitepress build docs",
                     "docs:preview":  "vitepress preview docs",
                     "test:service":  "npx tsx tests/service-tests.ts",
-                    "test:rotation":  "npx tsx tools/rotation-experiment/run.ts"
+                    "test:rotation":  "npx tsx tools/rotation-experiment/run.ts",
+                    "test:side-effects":  "npx tsx tests/import-side-effect.test.ts"
                 },
     "keywords":  [
                      "opencode",

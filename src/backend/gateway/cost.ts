@@ -43,7 +43,10 @@ export function priceFor(model: string | null | undefined): { input: number; out
  */
 export function costOf(model: string | null | undefined, promptTokens: number, completionTokens: number): number {
   const p = priceFor(model);
-  const cost = (promptTokens / 1_000_000) * p.input + (completionTokens / 1_000_000) * p.output;
+  // Negative/NaN token counts must never produce a negative (refund) cost.
+  const tin = Number.isFinite(promptTokens) && promptTokens > 0 ? promptTokens : 0;
+  const tout = Number.isFinite(completionTokens) && completionTokens > 0 ? completionTokens : 0;
+  const cost = (tin / 1_000_000) * p.input + (tout / 1_000_000) * p.output;
   return Math.round(cost * 1e8) / 1e8;
 }
 
