@@ -45,6 +45,9 @@ data/active-connection.json
 .gh_token
 .testkey
 
+# Agent tooling worktrees (never commit: hundreds of MB of node_modules)
+.agents/
+
 # Development and Local Indexers
 .omo/
 .codegraph
