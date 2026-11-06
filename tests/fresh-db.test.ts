@@ -56,7 +56,7 @@ async function main(): Promise<void> {
     const prices = db.prepare('SELECT COUNT(*) AS c FROM model_prices').get() as { c: number };
     check('prices are seeded', prices.c > 0, String(prices.c));
     const cols = (db.prepare('PRAGMA table_info(model_prices)').all() as Array<{ name: string }>).map((c) => c.name);
-    check('canonical price columns present', cols.includes('input_per_1m') && cols.includes('output_per_1m'), cols.join(','));
+    check('canonical price columns present', cols.includes('cost_per_1m_in') && cols.includes('cost_per_1m_out'), cols.join(','));
   }
 
   // A second init must be a no-op (idempotent migrations).

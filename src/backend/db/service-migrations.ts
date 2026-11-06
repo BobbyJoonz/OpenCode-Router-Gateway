@@ -29,10 +29,11 @@ export function runServiceMigrations(db: Database.Database): void {
     -- the first start (SqliteError: no such table: model_prices). It lives here
     -- with the canonical columns the runtime reads.
     -- ------------------------------------------------------------------
+    -- cost.ts reads cost_per_1m_in / cost_per_1m_out, so those are canonical.
     CREATE TABLE IF NOT EXISTS model_prices (
-      model         TEXT PRIMARY KEY,
-      input_per_1m  REAL NOT NULL DEFAULT 0,
-      output_per_1m REAL NOT NULL DEFAULT 0
+      model          TEXT PRIMARY KEY,
+      cost_per_1m_in  REAL NOT NULL DEFAULT 0,
+      cost_per_1m_out REAL NOT NULL DEFAULT 0
     );
 
     -- ------------------------------------------------------------------
@@ -122,6 +123,22 @@ export function runServiceMigrations(db: Database.Database): void {
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) insertSetting.run(k, v);
+
+  // Repair: an earlier revision of this file created model_prices with
+  // input_per_1m/output_per_1m while cost.ts reads cost_per_1m_in/out. Add the
+  // canonical columns and backfill so upgraded databases keep working.
+  {
+    const cols = new Set(
+      (db.prepare('PRAGMA table_info(model_prices)').all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (!cols.has('cost_per_1m_in')) {
+      db.exec('ALTER TABLE model_prices ADD COLUMN cost_per_1m_in REAL NOT NULL DEFAULT 0');
+      db.exec('ALTER TABLE model_prices ADD COLUMN cost_per_1m_out REAL NOT NULL DEFAULT 0');
+      if (cols.has('input_per_1m')) {
+        db.exec('UPDATE model_prices SET cost_per_1m_in = COALESCE(input_per_1m, 0), cost_per_1m_out = COALESCE(output_per_1m, 0)');
+      }
+    }
+  }
 
   // Seed a small price table. Unknown models cost 0 and are logged as such.
   const priceCols = new Set(
