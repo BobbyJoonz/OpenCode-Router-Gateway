@@ -9,8 +9,18 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "jsx": "react-jsx",
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src/backend/**/*", "tests/**/*", "tools/**/*"],
-  "exclude": ["node_modules", "src/frontend", "dist"]
+  "include": [
+    "src/backend/**/*",
+    "tests/**/*",
+    "tools/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "src/frontend",
+    "dist"
+  ]
 }

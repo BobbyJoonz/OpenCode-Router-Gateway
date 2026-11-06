@@ -24,6 +24,10 @@ export interface PoolEvent {
 export interface PoolStatus {
   size: number;
   ready: number;
+  /** Human-readable capacity state: full | reduced | none */
+  capacity: 'full' | 'reduced' | 'none';
+  capacityNote: string;
+  lastEnsure: { at: string; started: number; noCandidate: boolean; ready: number } | null;
   slots: Array<{
     index: number;
     state: string;
@@ -75,6 +79,7 @@ export class EgressPool {
   private sticky = new Map<number, number>();
   private events: PoolEvent[] = [];
   private rotationTimes: number[] = [];
+  private lastEnsure: { at: string; started: number; noCandidate: boolean; ready: number } | null = null;
   private metrics = {
     rotations: 0,
     failovers: 0,
@@ -142,13 +147,24 @@ export class EgressPool {
   public async ensureAll(): Promise<number> {
     return this.run(async () => {
       let started = 0;
+      let noCandidate = false;
       for (const slot of this.slots) {
         if (slot.state === 'ready') continue;
         const row = this.pickCandidate();
-        if (!row) break;
+        if (!row) {
+          // Do not abort the whole pass: other slots may still be startable.
+          noCandidate = true;
+          continue;
+        }
         const result = await this.startSlot(slot, row);
         if (result.ok) started++;
       }
+      this.lastEnsure = {
+        at: new Date().toISOString(),
+        started,
+        noCandidate,
+        ready: this.slots.filter((s) => s.state === 'ready').length
+      };
       return started;
     });
   }
@@ -287,7 +303,15 @@ export class EgressPool {
   }
 
   /**
-   * Best next node: routable, working, highest health, not already used by another slot.
+   * Best next node, in three tiers so a pool can always reach full capacity when
+   * *any* usable node exists:
+   *
+   *   1. verified working nodes (best),
+   *   2. nodes that passed a TCP pre-screen but were never verified,
+   *   3. completely untested nodes (last resort).
+   *
+   * Previously only tier 1 was considered, so a fresh install with a private
+   * subscription could end up with a single ready slot — or none.
    */
   public pickCandidate(excludeId: number | null = null): SlotConfigRow | null {
     const busy = new Set<number>(
@@ -295,21 +319,21 @@ export class EgressPool {
     );
     if (excludeId !== null) busy.add(excludeId);
 
-    const rows = db
-      .prepare(
-        `SELECT * FROM configs
-          WHERE last_status = 'working'
-            AND (? IS NULL OR id != ?)
-          ORDER BY COALESCE(health_score, 100) DESC, COALESCE(last_latency_ms, 9999) ASC
-          LIMIT 200`
-      )
-      .all(excludeId, excludeId) as any[];
+    const order = `ORDER BY COALESCE(health_score, 100) DESC, COALESCE(last_latency_ms, 9999) ASC, id ASC LIMIT 200`;
+    const tiers = [
+      `SELECT * FROM configs WHERE last_status = 'working' AND (? IS NULL OR id != ?) ${order}`,
+      `SELECT * FROM configs WHERE last_status != 'failed' AND tcp_alive = 1 AND (? IS NULL OR id != ?) ${order}`,
+      `SELECT * FROM configs WHERE last_status = 'untested' AND tcp_alive IS NULL AND (? IS NULL OR id != ?) ${order}`
+    ];
 
-    for (const row of rows) {
-      if (!isValidConfigRow(row)) continue;
-      if (busy.has(row.id)) continue;
-      if (!isRoutableEgressAddress(row.address)) continue;
-      return row as SlotConfigRow;
+    for (const sql of tiers) {
+      const rows = db.prepare(sql).all(excludeId, excludeId) as any[];
+      for (const row of rows) {
+        if (!isValidConfigRow(row)) continue;
+        if (busy.has(row.id)) continue;
+        if (!isRoutableEgressAddress(row.address)) continue;
+        return row as SlotConfigRow;
+      }
     }
     return null;
   }
@@ -339,9 +363,21 @@ export class EgressPool {
       if (s.state === 'ready' && s.pid && !s.isProcessAlive()) stuck.push(`slot ${s.index}: process gone but marked ready`);
     }
 
+    const ready = slots.filter((s) => s.state === 'ready').length;
+    const capacity: 'full' | 'reduced' | 'none' = ready === 0 ? 'none' : ready >= this.size ? 'full' : 'reduced';
+    const capacityNote =
+      capacity === 'full'
+        ? `${ready}/${this.size} slots ready`
+        : capacity === 'none'
+          ? 'No egress slot is ready. Run a pre-screen or add a subscription, then POST /api/egress/ensure.'
+          : `Only ${ready}/${this.size} slots ready — not enough distinct routable nodes. Add a subscription or run a pre-screen.`;
+
     return {
       size: this.size,
-      ready: slots.filter((s) => s.state === 'ready').length,
+      ready,
+      capacity,
+      capacityNote,
+      lastEnsure: this.lastEnsure,
       slots,
       metrics: {
         ...this.metrics,

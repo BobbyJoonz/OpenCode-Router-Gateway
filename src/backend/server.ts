@@ -11,6 +11,7 @@ import { LatencyTester } from './tester/latency-tester';
 import { BulkPrescreener } from './tester/bulk-prescreener';
 import { HealthMonitor } from './tester/health-monitor';
 import { egressPool } from './vpn/egress-pool';
+import { Doctor } from './doctor';
 import { KeyManager } from './gateway/key-manager';
 import { UpstreamClient } from './gateway/upstream-client';
 import { createGatewayRouter } from './gateway/openai-router';
@@ -462,6 +463,19 @@ app.get('/api/diagnostics', (req: Request, res: Response) => {
     launcherScript: launcherPath,
     history: sanitizedHistory
   });
+});
+
+// ---------------------------------------------------------------------------
+// Doctor: one call that answers "can this deployment serve?"
+// ---------------------------------------------------------------------------
+app.get('/api/doctor', async (req: Request, res: Response) => {
+  const live = String(req.query.live || '') === '1' || String(req.query.live) === 'true';
+  try {
+    const report = await Doctor.run({ live });
+    res.status(report.ok ? 200 : 503).json(report);
+  } catch (err: any) {
+    res.status(500).json({ ok: false, error: err?.message || 'doctor failed' });
+  }
 });
 
 // ---------------------------------------------------------------------------
