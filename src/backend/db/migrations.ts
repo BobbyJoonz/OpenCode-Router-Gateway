@@ -231,7 +231,8 @@ export function runMigrations(db: Database.Database): void {
     gateway_mapreduce_enabled: 'false',
     gateway_mapreduce_context_limit: '0',
     gateway_mapreduce_chunk_tokens: '30000',
-    gateway_mapreduce_max_chunks: '16'
+    gateway_mapreduce_max_chunks: '16',
+    gateway_mapreduce_instruction: ''
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

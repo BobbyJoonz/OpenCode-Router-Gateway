@@ -7,7 +7,7 @@ import { egressPool } from '../vpn/egress-pool';
 import { XraySlot } from '../vpn/xray-slot';
 import { ProviderRouter } from './provider-router';
 import { ModelRouter } from './model-router';
-import { mapReduce, shouldMapReduce } from './map-reduce';
+import { runMapPhase, shouldMapReduce } from './map-reduce';
 import { TpmTracker } from '../providers/tpm-tracker';
 import { ProviderRegistry, ProviderRow } from '../providers/provider-registry';
 import { FreshnessTracker } from '../tester/freshness';
@@ -415,8 +415,10 @@ export function createGatewayRouter(): Router {
     }
 
     // Map-reduce: opt-in handling for prompts larger than the model window.
-    // A gateway cannot widen a model's context, but it can summarise the input in
-    // chunks and answer from the notes. Streaming is never map-reduced.
+    // The map phase runs here (non-streaming), then the reduce body is forwarded
+    // through the normal path — so a streaming client still receives a live stream
+    // instead of waiting for the whole answer.
+    let extraUsage = { prompt: 0, completion: 0, total: 0 };
     const mapReduceEnabled = getSetting('gateway_mapreduce_enabled', 'false') === 'true';
     const contextLimit = parseInt(getSetting('gateway_mapreduce_context_limit', '0'), 10) || 0;
     if (mapReduceEnabled && shouldMapReduce(body, contextLimit, TpmTracker.estimateFromBody(body))) {
@@ -427,11 +429,12 @@ export function createGatewayRouter(): Router {
       }
       egressPool.track(slot);
       try {
-        const result = await mapReduce({
+        const phase = await runMapPhase({
           body: forwardBody,
           contextLimit,
           chunkTokens: Math.max(1000, parseInt(getSetting('gateway_mapreduce_chunk_tokens', '30000'), 10)),
           maxChunks: Math.max(1, Math.min(parseInt(getSetting('gateway_mapreduce_max_chunks', '16'), 10), 64)),
+          mapInstruction: getSetting('gateway_mapreduce_instruction', ''),
           forwardJson: async (chunkBody: any) => {
             const routed = await ProviderRouter.forward(
               {
@@ -449,22 +452,16 @@ export function createGatewayRouter(): Router {
           }
         });
 
-        KeyManager.recordUsage({
-          keyId: key.id,
-          model: body.model || null,
-          promptTokens: result.usage.prompt_tokens,
-          completionTokens: result.usage.completion_tokens,
-          totalTokens: result.usage.total_tokens,
-          statusCode: 200,
-          latencyMs: Date.now() - startedAt,
-          upstream: UpstreamClient.resolveConfig().baseUrl,
-          egressNodeId: slot.node?.id ?? null
-        });
-
+        // Hand the reduce call to the normal path (streaming or not) and carry the
+        // map-phase tokens into the usage record.
+        forwardBody = phase.reduceBody;
+        extraUsage = {
+          prompt: phase.usage.prompt_tokens,
+          completion: phase.usage.completion_tokens,
+          total: phase.usage.total_tokens
+        };
         res.setHeader('x-opencode-mapreduce', '1');
-        res.setHeader('x-opencode-chunks', String(result.chunks));
-        res.json(result.final);
-        return;
+        res.setHeader('x-opencode-chunks', String(phase.chunks));
       } catch (err: any) {
         if (err?.code === 'MAPREDUCE_TOO_LARGE') {
           res.status(413).json(
@@ -558,9 +555,9 @@ export function createGatewayRouter(): Router {
           if (nodeId) FreshnessTracker.recordSuccess(nodeId);
           const meta = { nodeId, provider };
           if (wantsStream) {
-            await pipeStream(req, res, forwarded, key, body, startedAt, meta);
+            await pipeStream(req, res, forwarded, key, body, startedAt, meta, extraUsage);
           } else {
-            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, meta);
+            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, meta, extraUsage);
           }
           return;
         }
@@ -622,7 +619,8 @@ async function relayJson(
   key: ApiKeyRow,
   body: any,
   startedAt: number,
-  meta: { nodeId: number | null; provider: ProviderRow | null }
+  meta: { nodeId: number | null; provider: ProviderRow | null },
+  extraUsage: { prompt: number; completion: number; total: number } = { prompt: 0, completion: 0, total: 0 }
 ): Promise<void> {
   let text = '';
   try {
@@ -645,9 +643,9 @@ async function relayJson(
   KeyManager.recordUsage({
     keyId: key.id,
     model: modelName,
-    promptTokens,
-    completionTokens,
-    totalTokens: toNonNegativeInt(usage.total_tokens),
+    promptTokens: promptTokens + extraUsage.prompt,
+    completionTokens: completionTokens + extraUsage.completion,
+    totalTokens: toNonNegativeInt(usage.total_tokens) + extraUsage.total,
     statusCode,
     latencyMs: Date.now() - startedAt,
     upstream: meta.provider?.base_url || UpstreamClient.resolveConfig().baseUrl,
@@ -670,7 +668,8 @@ async function pipeStream(
   key: ApiKeyRow,
   body: any,
   startedAt: number,
-  meta: { nodeId: number | null; provider: ProviderRow | null }
+  meta: { nodeId: number | null; provider: ProviderRow | null },
+  extraUsage: { prompt: number; completion: number; total: number } = { prompt: 0, completion: 0, total: 0 }
 ): Promise<void> {
   res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -729,9 +728,9 @@ async function pipeStream(
     KeyManager.recordUsage({
       keyId: key.id,
       model: modelName,
-      promptTokens,
-      completionTokens,
-      totalTokens: toNonNegativeInt(usage.total_tokens),
+      promptTokens: promptTokens + extraUsage.prompt,
+      completionTokens: completionTokens + extraUsage.completion,
+      totalTokens: toNonNegativeInt(usage.total_tokens) + extraUsage.total,
       statusCode: clientClosed ? 499 : 200,
       latencyMs: Date.now() - startedAt,
       upstream: meta.provider?.base_url || UpstreamClient.resolveConfig().baseUrl,

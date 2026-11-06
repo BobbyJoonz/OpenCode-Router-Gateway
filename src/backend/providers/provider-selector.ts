@@ -43,7 +43,7 @@ export class ProviderSelector {
     );
 
     const withCapacity = all.filter((provider) =>
-      TpmTracker.canAccept(provider.id, estimatedTokens, provider.tpm_limit)
+      TpmTracker.canAccept(provider.id, estimatedTokens, provider.tpm_limit, provider.rpm_limit)
     );
     if (withCapacity.length === 0) return [];
 

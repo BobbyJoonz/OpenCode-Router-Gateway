@@ -554,8 +554,9 @@ app.get('/metrics', (req: Request, res: Response) => {
   const storage = RetentionService.stats();
   const lastRun = RetentionService.getLastRun();
   const providerLimits = new Map<number, number>(ProviderRegistry.list().map((p: any) => [p.id, p.tpm_limit] as [number, number]));
+  const providerRpmLimits = new Map<number, number>(ProviderRegistry.list().map((p: any) => [p.id, p.rpm_limit] as [number, number]));
   const providerNames = new Map<number, string>(ProviderRegistry.list().map((p: any) => [p.id, p.name] as [number, string]));
-  const tpmSnapshot = TpmTracker.snapshot(providerLimits);
+  const tpmSnapshot = TpmTracker.snapshot(providerLimits, providerRpmLimits);
   const body = Metrics.render({
     poolSize: pool.size,
     poolReady: pool.ready,
@@ -571,7 +572,9 @@ app.get('/metrics', (req: Request, res: Response) => {
       name: providerNames.get(t.providerId) || String(t.providerId),
       used: t.used,
       limit: t.limit,
-      total: TpmTracker.totalFor(t.providerId)
+      total: TpmTracker.totalFor(t.providerId),
+      rpmUsed: t.requests,
+      rpmLimit: t.rpmLimit
     }))
   });
   res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
@@ -848,6 +851,7 @@ const SETTING_WHITELIST = new Set([
   'gateway_mapreduce_context_limit',
   'gateway_mapreduce_chunk_tokens',
   'gateway_mapreduce_max_chunks',
+  'gateway_mapreduce_instruction',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',

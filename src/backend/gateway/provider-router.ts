@@ -92,7 +92,7 @@ export class ProviderRouter {
           (p) =>
             allowed.has(p.id) &&
             !tried.includes(p.id) &&
-            TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit)
+            TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit, p.rpm_limit)
         );
         pool.sort((a, b) => pinnedOrder.indexOf(a.id) - pinnedOrder.indexOf(b.id));
         provider = pool[0] || null;
@@ -103,7 +103,7 @@ export class ProviderRouter {
         provider =
           candidates[0] ||
           this.available().find(
-            (p) => !tried.includes(p.id) && TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit)
+            (p) => !tried.includes(p.id) && TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit, p.rpm_limit)
           ) ||
           null;
       }
@@ -112,18 +112,28 @@ export class ProviderRouter {
         // Distinguish "no providers at all" from "all providers are at their TPM
         // ceiling" — the caller answers 429 + Retry-After for the latter.
         const untried = this.available().filter((p) => !tried.includes(p.id));
-        const tpmBlocked = untried.filter(
-          (p) => p.tpm_limit > 0 && !TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit)
+        const rateBlocked = untried.filter(
+          (p) =>
+            (p.tpm_limit > 0 || p.rpm_limit > 0) &&
+            !TpmTracker.canAccept(p.id, estimatedTokens, p.tpm_limit, p.rpm_limit)
         );
-        if (tpmBlocked.length > 0 && tpmBlocked.length === untried.length) {
-          throw Object.assign(new Error('All providers are at their token-per-minute limit'), {
-            code: 'PROVIDER_TPM_EXHAUSTED',
-            retryAfterMs: 60_000
-          });
+        if (rateBlocked.length > 0 && rateBlocked.length === untried.length) {
+          const onlyRpm = rateBlocked.every((p) => p.rpm_limit > 0 && TpmTracker.usedRequests(p.id) >= p.rpm_limit);
+          throw Object.assign(
+            new Error(
+              onlyRpm
+                ? 'All providers are at their requests-per-minute limit'
+                : 'All providers are at their token-per-minute limit'
+            ),
+            { code: 'PROVIDER_TPM_EXHAUSTED', retryAfterMs: 60_000 }
+          );
         }
         break;
       }
       tried.push(provider.id);
+
+      // Count the attempt against the provider's RPM window before calling it.
+      TpmTracker.recordRequest(provider.id);
 
       // Apply the per-provider model name when the request was model-routed.
       const modelOverride = selection?.modelByProvider?.[provider.id];

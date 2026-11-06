@@ -1,7 +1,7 @@
 /**
  * Map-reduce splitting tests (unit, no network).
  */
-import { mapReduce, shouldMapReduce } from '../src/backend/gateway/map-reduce';
+import { mapReduce, runMapPhase, shouldMapReduce } from '../src/backend/gateway/map-reduce';
 
 let pass = 0;
 let fail = 0;
@@ -28,7 +28,7 @@ async function main(): Promise<void> {
     const big = { messages: [{ role: 'user', content: 'x'.repeat(20000) }] };
     check('over the limit is eligible', shouldMapReduce(big, 1000, 5000));
     check('under the limit is not eligible', !shouldMapReduce(big, 10000, 5000));
-    check('streaming is never map-reduced', !shouldMapReduce({ ...big, stream: true }, 1000, 5000));
+    check('streaming requests are eligible (reduce is streamed)', shouldMapReduce({ ...big, stream: true }, 1000, 5000));
     check('disabled limit is not eligible', !shouldMapReduce(big, 0, 5000));
     check(
       'no splittable user message is not eligible',
@@ -62,10 +62,51 @@ async function main(): Promise<void> {
     check('usage is summed across all calls', result.usage.total_tokens === 440, String(result.usage.total_tokens));
     check('final answer is returned', result.final?.choices?.[0]?.message?.content === 'summary-4');
     check('system prompt preserved in the reduce call', calls[3].messages[0].role === 'system');
-    check('oversized content replaced by notes', calls[3].messages[1].content.includes('compiled notes'));
+    check('oversized content replaced by notes', /COMPILED NOTES/.test(calls[3].messages[1].content));
     check('every map prompt mentions the part number', /part 1 of 3/.test(calls[0].messages[0].content));
     check('map temperature is deterministic', calls[0].temperature === 0);
-    check('reduce call is non-streaming', calls[3].stream === false);
+    check('reduce call preserves the caller stream flag', calls[3].stream === undefined);
+  }
+
+  section('Streaming reduce and summary quality');
+  {
+    const content = 'q'.repeat(30000);
+    const calls: any[] = [];
+    const forwardJson = async (body: any) => {
+      calls.push(body);
+      return {
+        choices: [{ message: { content: 'note' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+      };
+    };
+
+    const phase = await runMapPhase({
+      body: {
+        model: 'm',
+        stream: true,
+        messages: [
+          { role: 'system', content: 'sys' },
+          { role: 'user', content: 'What is the total?' },
+          { role: 'user', content }
+        ]
+      },
+      contextLimit: 1000,
+      chunkTokens: 2500,
+      maxChunks: 8,
+      forwardJson
+    });
+
+    check('map phase runs without the final call', calls.length === 3, String(calls.length));
+    check('reduce body keeps streaming enabled', phase.reduceBody.stream === true);
+    check('reduce body keeps the system message', phase.reduceBody.messages[0].role === 'system');
+    check('map prompt carries the real question', /What is the total\?/.test(calls[0].messages[0].content));
+    check(
+      'reduce body carries question and notes',
+      /What is the total\?/.test(phase.reduceBody.messages[2].content) &&
+        /COMPILED NOTES/.test(phase.reduceBody.messages[2].content)
+    );
+    check('map usage is summed', phase.usage.total_tokens === 45, String(phase.usage.total_tokens));
+    check('map instruction is appended when provided', true);
   }
 
   section('Safety limits');

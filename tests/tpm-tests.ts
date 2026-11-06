@@ -56,6 +56,21 @@ function main(): void {
     check('reset clears the window', TpmTracker.used(1) === 0);
   }
 
+  section('Requests per minute (RPM)');
+  {
+    TpmTracker.reset();
+    for (let i = 0; i < 5; i++) TpmTracker.recordRequest(7);
+    check('requests counted', TpmTracker.usedRequests(7) === 5, String(TpmTracker.usedRequests(7)));
+    check('unlimited rpm accepts', TpmTracker.canAccept(7, 10, 0, 0));
+    check('rpm ceiling blocks at the limit', !TpmTracker.canAccept(7, 10, 0, 5));
+    check('rpm ceiling accepts below the limit', TpmTracker.canAccept(7, 10, 0, 6));
+    check('total requests tracked', TpmTracker.totalRequestsFor(7) === 5, String(TpmTracker.totalRequestsFor(7)));
+    // A provider can be within TPM but over RPM: RPM must block it.
+    check('rpm blocks even with TPM room', !TpmTracker.canAccept(7, 1, 1_000_000, 5));
+    TpmTracker.reset();
+    check('reset clears request windows', TpmTracker.usedRequests(7) === 0);
+  }
+
   section('Provider selection respects TPM');
   {
     TpmTracker.reset();
@@ -85,6 +100,20 @@ function main(): void {
     TpmTracker.record(b.id, 950);
     candidates = ProviderSelector.candidates([], 100);
     check('all providers over budget yields none', candidates.length === 0, String(candidates.length));
+
+    // RPM-only provider: excluded once its per-minute request budget is used, even
+    // though its token budget is untouched.
+    TpmTracker.reset();
+    ProviderRegistry.update(a.id, { tpm_limit: 0, rpm_limit: 1 });
+    check('rpm_limit persisted', ProviderRegistry.get(a.id)?.rpm_limit === 1);
+    check('rpm provider available initially', ProviderSelector.candidates([], 0).length === 2);
+    TpmTracker.recordRequest(a.id);
+    const afterRpm = ProviderSelector.candidates([], 0);
+    check(
+      'rpm-exhausted provider is excluded',
+      afterRpm.length === 1 && afterRpm[0].id === b.id,
+      JSON.stringify(afterRpm.map((c) => c.id))
+    );
 
     TpmTracker.reset();
     ProviderRegistry.remove(a.id);

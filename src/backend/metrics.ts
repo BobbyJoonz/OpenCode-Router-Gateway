@@ -61,7 +61,7 @@ export class Metrics {
     retentionDeletedTotal: number;
     rotations: number;
     failovers: number;
-    providers: Array<{ name: string; used: number; limit: number; total: number }>;
+    providers: Array<{ name: string; used: number; limit: number; total: number; rpmUsed: number; rpmLimit: number }>;
   }): string {
     const lines: string[] = [];
     const help = (name: string, type: string, text: string) => {
@@ -127,11 +127,15 @@ export class Metrics {
     help('opencode_router_provider_tpm_used', 'gauge', 'Tokens sent to a provider in the current minute.');
     help('opencode_router_provider_tpm_limit', 'gauge', 'Configured TPM ceiling for a provider (0 = unlimited).');
     help('opencode_router_provider_tokens_total', 'counter', 'Tokens sent to a provider since start.');
+    help('opencode_router_provider_rpm_used', 'gauge', 'Requests sent to a provider in the current minute.');
+    help('opencode_router_provider_rpm_limit', 'gauge', 'Configured RPM ceiling for a provider (0 = unlimited).');
     for (const provider of gauges.providers) {
       const name = this.esc(provider.name);
       lines.push(`opencode_router_provider_tpm_used{provider="${name}"} ${provider.used}`);
       lines.push(`opencode_router_provider_tpm_limit{provider="${name}"} ${provider.limit}`);
       lines.push(`opencode_router_provider_tokens_total{provider="${name}"} ${provider.total}`);
+      lines.push(`opencode_router_provider_rpm_used{provider="${name}"} ${provider.rpmUsed}`);
+      lines.push(`opencode_router_provider_rpm_limit{provider="${name}"} ${provider.rpmLimit}`);
     }
 
     return lines.join('\n') + '\n';
