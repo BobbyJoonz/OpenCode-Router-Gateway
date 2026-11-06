@@ -834,7 +834,7 @@ const SETTING_WHITELIST = new Set([
   'pool_watchdog_interval_ms'
 ]);
 
-const SENSITIVE_SETTINGS = new Set(['gateway_upstream_base_url']);
+const SENSITIVE_SETTINGS = new Set(['gateway_upstream_base_url', 'alert_webhook_url']);
 
 function redactSetting(key: string, value: string): string {
   if (!SENSITIVE_SETTINGS.has(key)) return value;
