@@ -165,6 +165,15 @@ export class VpnEngine {
     safeWriteSensitiveFile(this.configFilePath, JSON.stringify(xrayConfig, null, 2));
 
     const logFile = path.join(path.dirname(this.configFilePath), 'xray.log');
+    // Bound the log: a long-running engine would otherwise append forever.
+    try {
+      const maxLog = Math.max(64 * 1024, parseInt(getSetting('xray_log_max_bytes', '5242880'), 10));
+      if (fs.existsSync(logFile) && fs.statSync(logFile).size > maxLog) {
+        fs.truncateSync(logFile, 0);
+      }
+    } catch {
+      // logging must never break startup
+    }
     const logFd = fs.openSync(logFile, 'a', 0o600);
     try {
       fs.fchmodSync(logFd, 0o600);

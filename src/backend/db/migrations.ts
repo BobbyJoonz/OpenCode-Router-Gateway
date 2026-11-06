@@ -201,7 +201,15 @@ export function runMigrations(db: Database.Database): void {
     // Routing
     egress_policy: 'sticky',                   // sticky | round_robin | least_loaded | random
     gateway_require_model_route: 'false',      // true => unknown model is a 404, never a passthrough
-    gateway_model_prefix_provider: 'false'      // true => 'provider/model' pins a provider
+    gateway_model_prefix_provider: 'false',     // true => 'provider/model' pins a provider
+    // Storage / retention (bounded growth)
+    usage_retention_days: '90',                 // 0 = keep forever
+    test_history_retention_days: '30',
+    usage_max_rows: '500000',
+    db_max_mb: '512',
+    retention_interval_seconds: '3600',
+    retention_vacuum_threshold: '5000',         // rows deleted before a VACUUM is worth it
+    xray_log_max_bytes: '5242880'
   };
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
   for (const [k, v] of Object.entries(defaults)) {

@@ -23,6 +23,18 @@ try {
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+// ---------------------------------------------------------------------------
+// Durability / latency / stability tuning
+//
+// synchronous=NORMAL is safe with WAL (a crash can lose at most the last
+// transaction, never corrupt the database) and removes an fsync per commit.
+// busy_timeout makes concurrent writers wait instead of throwing SQLITE_BUSY.
+// wal_autocheckpoint keeps the -wal file from growing without bound.
+// ---------------------------------------------------------------------------
+db.pragma('synchronous = NORMAL');
+db.pragma('busy_timeout = 5000');
+db.pragma('wal_autocheckpoint = 1000');
+
 export function initDatabase() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS sources (

@@ -71,6 +71,48 @@ page, readiness/drain and a legal baseline.
 
 ---
 
+## [2.2.0] — Bounded resources
+
+Makes long-running deployments safe: the database can no longer grow without
+limit, SQLite is tuned for stability, and every process has a memory ceiling.
+
+### Added
+
+- **Retention service** (`service/retention.ts`): age-based pruning
+  (`usage_retention_days`, `test_history_retention_days`), a hard row cap
+  (`usage_max_rows`), prescreen history capped at 100 runs, and a `VACUUM` when
+  enough rows were removed. User data (configs, providers, routes, API keys) is
+  never touched. Endpoints: `GET /api/retention/status`, `POST /api/retention/run`.
+- **Storage health in `doctor`**: db/WAL size, usage rows, retention window, and
+  warnings when a limit is approached.
+- **SQLite tuning**: `synchronous=NORMAL` (safe with WAL), `busy_timeout=5000`,
+  `wal_autocheckpoint=1000`.
+- **Bounded Xray log**: truncated at `xray_log_max_bytes` (5 MB default).
+- **Memory ceilings**: systemd `MemoryHigh=768M` / `MemoryMax=1G` / `TasksMax=256`
+  and `NODE_OPTIONS=--max-old-space-size=512`; Docker `mem_limit: 1g`,
+  `pids_limit: 256`.
+
+### Measured footprint (reference)
+
+| Component | Disk / RAM |
+|---|---|
+| source + frontend dist | ~1.3 MB |
+| `bin/` (xray + geo data) | 43.4 MB |
+| `node_modules` (dev) | 245 MB |
+| database (3 841 nodes) | ~4.4 MB + WAL |
+| server process | 50–80 MB RSS |
+| each egress slot | ~22 MB RSS |
+
+Growth after this release is bounded: `usage_log` is ~199 B/request, pruned at
+90 days or 500 000 rows, whichever comes first.
+
+### Tests
+
+- `tests/retention-tests.ts` — 13 assertions on an in-memory database (age
+  pruning, row cap, user-data safety, history/run caps, idempotency).
+
+---
+
 ## [2.1.0] — Routing hardening
 
 Closes the five routing gaps documented in 2.0.

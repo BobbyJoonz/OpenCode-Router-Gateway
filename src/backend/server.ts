@@ -12,6 +12,7 @@ import { BulkPrescreener } from './tester/bulk-prescreener';
 import { HealthMonitor } from './tester/health-monitor';
 import { egressPool } from './vpn/egress-pool';
 import { Doctor } from './doctor';
+import { RetentionService } from './service/retention';
 import { ModelRouter } from './gateway/model-router';
 import { KeyManager } from './gateway/key-manager';
 import { UpstreamClient } from './gateway/upstream-client';
@@ -102,6 +103,9 @@ if (isDirectRun) {
   // Background health monitor (no-op when disabled in settings).
   HealthMonitor.start();
 
+  // Bounded growth: prune usage history and reclaim space on a timer.
+  RetentionService.start();
+
   // Serving pool: N independent Xray slots with a watchdog for automatic failover.
   egressPool.init();
   egressPool
@@ -119,6 +123,11 @@ if (isDirectRun) {
     console.log(`[Server] ${signal} received — shutting down`);
     try {
       HealthMonitor.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      RetentionService.stop();
     } catch {
       /* ignore */
     }
@@ -467,6 +476,29 @@ app.get('/api/diagnostics', (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// Storage / retention (bounded growth)
+// ---------------------------------------------------------------------------
+app.get('/api/retention/status', (req: Request, res: Response) => {
+  res.json({
+    stats: RetentionService.stats(),
+    lastRun: RetentionService.getLastRun(),
+    scheduled: RetentionService.isScheduled()
+  });
+});
+
+app.post('/api/retention/run', (req: Request, res: Response) => {
+  if (RetentionService.isRunning()) {
+    return res.status(409).json({ error: 'A retention run is already in progress' });
+  }
+  try {
+    const result = RetentionService.runNow();
+    res.json({ success: true, result, stats: RetentionService.stats() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'retention failed' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Doctor: one call that answers "can this deployment serve?"
 // ---------------------------------------------------------------------------
 app.get('/api/doctor', async (req: Request, res: Response) => {
@@ -665,6 +697,13 @@ const SETTING_WHITELIST = new Set([
   'egress_policy',
   'gateway_require_model_route',
   'gateway_model_prefix_provider',
+  'usage_retention_days',
+  'test_history_retention_days',
+  'usage_max_rows',
+  'db_max_mb',
+  'retention_interval_seconds',
+  'retention_vacuum_threshold',
+  'xray_log_max_bytes',
   'gateway_quota_reserve_tokens',
   'gateway_provider_policy',
   'gateway_max_provider_attempts',

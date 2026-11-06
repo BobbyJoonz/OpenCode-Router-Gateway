@@ -18,6 +18,8 @@ User=opencode
 Group=opencode
 WorkingDirectory=/opt/opencode-router
 EnvironmentFile=/opt/opencode-router/.env
+# Cap the heap so a leak fails fast instead of OOM-killing the host.
+Environment=NODE_OPTIONS=--max-old-space-size=512
 ExecStart=/opt/opencode-router/node_modules/.bin/tsx src/backend/server.ts
 Restart=always
 RestartSec=5
@@ -39,6 +41,10 @@ RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
 LimitNOFILE=65535
+# Memory/process guards: the service is expected to use 150-250 MB.
+MemoryHigh=768M
+MemoryMax=1G
+TasksMax=256
 
 # --- logging -------------------------------------------------------------
 StandardOutput=journal

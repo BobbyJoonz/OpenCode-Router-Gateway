@@ -5,6 +5,7 @@ import { db, getSetting } from './db/database';
 import { egressPool } from './vpn/egress-pool';
 import { UpstreamClient } from './gateway/upstream-client';
 import { EphemeralTunnelTester } from './tester/ephemeral-tunnel';
+import { RetentionService } from './service/retention';
 
 export interface DoctorCheck {
   name: string;
@@ -124,6 +125,24 @@ export class Doctor {
         fatal: false,
         detail: pool.stuck.join('; ')
       });
+    }
+
+    // ---------------------------------------------------------- storage
+    try {
+      const storage = RetentionService.stats();
+      const totalMb = (storage.dbBytes + storage.walBytes) / 1024 / 1024;
+      checks.push({
+        name: 'storage',
+        ok: storage.healthy,
+        fatal: false,
+        detail:
+          `db ${totalMb.toFixed(1)} MB (wal ${(storage.walBytes / 1024 / 1024).toFixed(1)} MB), ` +
+          `usage rows ${storage.usageRows}/${storage.limits.usageMaxRows}, ` +
+          `retention ${storage.limits.usageRetentionDays}d`,
+        hint: storage.warnings.length > 0 ? `${storage.warnings.join('; ')} — POST /api/retention/run` : undefined
+      });
+    } catch (err: any) {
+      checks.push({ name: 'storage', ok: false, fatal: false, detail: err?.message || 'storage check failed' });
     }
 
     // ---------------------------------------------------------- upstream config
