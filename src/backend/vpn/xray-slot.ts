@@ -50,6 +50,13 @@ export class XraySlot {
   public inFlight = 0;
   public totalRequests = 0;
 
+  // Result of the last real probe through this slot (EgressPool.probeAll).
+  // null = never probed.
+  public probeOk: boolean | null = null;
+  public probeStatus: number | null = null;
+  public probeLatencyMs: number | null = null;
+  public probeAt: number | null = null;
+
   private child: ChildProcess | null = null;
   private configPath: string;
   private binaryPath: string;

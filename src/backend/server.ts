@@ -128,6 +128,10 @@ export function bootstrap(): void {
   // Out-of-band alerting: storage pressure and pool capacity changes.
   startAlertMonitor();
 
+  // Real per-slot probe: keeps the pool using only IPs that can actually reach
+  // the target. 0 disables it (the /api/egress/probe endpoint still works).
+  startEgressProbe();
+
   // Serving pool: N independent Xray slots with a watchdog for automatic failover.
   egressPool.init();
   egressPool
@@ -539,6 +543,25 @@ function startAlertMonitor(): void {
   alertTimer.unref?.();
 }
 
+// ---------------------------------------------------------------------------
+// Periodic egress probe: marks slots that cannot reach the target so acquire()
+// stops routing through them.
+// ---------------------------------------------------------------------------
+let egressProbeTimer: NodeJS.Timeout | null = null;
+
+function startEgressProbe(): void {
+  if (egressProbeTimer) return;
+  const seconds = Math.max(0, parseInt(getSetting('egress_probe_interval_seconds', '0'), 10) || 0);
+  if (seconds <= 0) return;
+  if (!getSetting('egress_probe_url', '').trim()) return;
+  egressProbeTimer = setInterval(() => {
+    void egressPool.probeAll().catch((err: any) => {
+      console.error('[EgressProbe] failed:', err?.message || err);
+    });
+  }, seconds * 1000);
+  egressProbeTimer.unref?.();
+}
+
 function stopAlertMonitor(): void {
   if (alertTimer) {
     clearInterval(alertTimer);
@@ -665,6 +688,15 @@ app.post('/api/egress/failover/:slot', async (req: Request, res: Response) => {
   if (!Number.isInteger(slot)) return res.status(400).json({ error: 'invalid slot index' });
   const ok = await egressPool.failoverSlot(slot, 'manual');
   res.json({ success: ok, status: egressPool.status() });
+});
+
+app.post('/api/egress/probe', async (req: Request, res: Response) => {
+  try {
+    const results = await egressPool.probeAll();
+    res.json({ success: true, results, status: egressPool.status() });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'probe failed' });
+  }
 });
 
 app.post('/api/egress/reinit', async (req: Request, res: Response) => {
@@ -825,6 +857,10 @@ const SETTING_WHITELIST = new Set([
   'gateway_upstream_bypass_proxy_loopback',
   'gateway_stream_include_usage',
   'egress_policy',
+  'egress_probe_url',
+  'egress_probe_timeout_ms',
+  'egress_probe_rotate_on_fail',
+  'egress_probe_interval_seconds',
   'gateway_require_model_route',
   'gateway_model_prefix_provider',
   'usage_retention_days',

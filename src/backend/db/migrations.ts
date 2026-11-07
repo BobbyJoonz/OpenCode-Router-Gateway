@@ -200,7 +200,12 @@ export function runMigrations(db: Database.Database): void {
     gateway_max_provider_attempts: '3',
     gateway_freshness_weight: '0.2',
     // Routing
-    egress_policy: 'sticky',                   // sticky | round_robin | least_loaded | random
+    egress_policy: 'sticky',
+    // Real per-slot reachability probe (empty URL = disabled)
+    egress_probe_url: '',
+    egress_probe_timeout_ms: '8000',
+    egress_probe_rotate_on_fail: 'true',
+    egress_probe_interval_seconds: '0',                   // sticky | round_robin | least_loaded | random
     gateway_require_model_route: 'false',      // true => unknown model is a 404, never a passthrough
     gateway_model_prefix_provider: 'false',     // true => 'provider/model' pins a provider
     // Storage / retention (bounded growth)

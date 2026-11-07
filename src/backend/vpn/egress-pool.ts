@@ -2,6 +2,7 @@ import { db, getSetting } from '../db/database';
 import { XraySlot, SlotConfigRow, isValidConfigRow } from './xray-slot';
 import path from 'path';
 import { DATA_DIR, PROJECT_ROOT } from '../paths';
+import { request as undiciRequest, ProxyAgent } from 'undici';
 
 /** Loopback / link-local endpoints can never be a real egress. */
 export function isRoutableEgressAddress(address: string): boolean {
@@ -43,6 +44,11 @@ export interface PoolStatus {
     uptimeMs: number | null;
     lastError: string | null;
     failures: number;
+    /** null = never probed */
+    probeOk: boolean | null;
+    probeStatus: number | null;
+    probeLatencyMs: number | null;
+    probeAt: number | null;
   }>;
   metrics: {
     rotations: number;
@@ -182,6 +188,82 @@ export class EgressPool {
   /**
    * Get a ready slot for a client, preferring its previously assigned one.
    */
+  private probeAgents = new Map<number, ProxyAgent>();
+
+  private probeAgentFor(httpPort: number): ProxyAgent {
+    const cached = this.probeAgents.get(httpPort);
+    if (cached) return cached;
+    const agent = new ProxyAgent({ uri: `http://127.0.0.1:${httpPort}`, connections: 4 });
+    this.probeAgents.set(httpPort, agent);
+    return agent;
+  }
+
+  /**
+   * Real reachability probe through every ready slot.
+   *
+   * A live Xray process says nothing about whether the node can actually reach
+   * the target (Cloudflare blocks, dead nodes, DPI resets). This issues a real
+   * HTTP request through each slot and marks the failures so acquire() stops
+   * routing traffic through them.
+   */
+  public async probeAll(): Promise<
+    Array<{ index: number; ok: boolean; status: number | null; latencyMs: number | null; error?: string }>
+  > {
+    const url = getSetting('egress_probe_url', '').trim();
+    if (!url) return [];
+    const timeoutMs = Math.max(1000, parseInt(getSetting('egress_probe_timeout_ms', '8000'), 10) || 8000);
+    const rotateOnFail = getSetting('egress_probe_rotate_on_fail', 'true') === 'true';
+    const out: Array<{ index: number; ok: boolean; status: number | null; latencyMs: number | null; error?: string }> = [];
+
+    for (const slot of this.slots) {
+      if (slot.state !== 'ready') {
+        slot.probeOk = false;
+        out.push({ index: slot.index, ok: false, status: null, latencyMs: null, error: 'not ready' });
+        continue;
+      }
+      const startedAt = Date.now();
+      let status: number | null = null;
+      let error: string | undefined;
+      try {
+        const response = await undiciRequest(url, {
+          method: 'GET',
+          dispatcher: this.probeAgentFor(slot.httpPort),
+          headersTimeout: timeoutMs,
+          bodyTimeout: timeoutMs,
+          signal: AbortSignal.timeout(timeoutMs)
+        });
+        status = response.statusCode;
+        try {
+          for await (const _chunk of response.body) {
+            /* drain */
+          }
+        } catch {
+          /* ignore */
+        }
+      } catch (err: any) {
+        error = err?.message || 'probe failed';
+      }
+      const latencyMs = Date.now() - startedAt;
+      // 2xx/3xx/4xx (except 403) prove the node reached the target. 5xx, a 403
+      // (Cloudflare block) and timeouts mean this IP cannot serve the request.
+      const ok = status !== null && status < 500 && status !== 403;
+      slot.probeOk = ok;
+      slot.probeStatus = status;
+      slot.probeLatencyMs = latencyMs;
+      slot.probeAt = Date.now();
+      out.push({ index: slot.index, ok, status, latencyMs, error });
+      this.recordEvent(slot.index, ok ? 'start' : 'error', ok ? `probe ok (${status}, ${latencyMs}ms)` : `probe failed: ${error || 'status ' + status}`);
+      if (!ok && rotateOnFail) {
+        try {
+          await this.rotateSlot(slot.index, `probe failed: ${error || 'status ' + status}`);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+    return out;
+  }
+
   public async acquire(keyId: number | null, policyOverride?: string): Promise<XraySlot | null> {
     // Bounded admission: a slot may only carry N concurrent requests. Beyond that
     // the caller waits (up to a timeout) instead of piling unbounded work onto a
@@ -196,6 +278,12 @@ export class EgressPool {
       ready = this.slots.filter((s) => s.state === 'ready');
       if (ready.length === 0) return null;
     }
+
+    // Only serve through slots whose last real probe succeeded. If none passed
+    // (or none was probed yet) fall back to the full ready set so the pool never
+    // dead-ends.
+    const probed = ready.filter((s) => s.probeOk !== false);
+    if (probed.length > 0) ready = probed;
 
     for (;;) {
       const available = ready.filter((s) => s.inFlight < maxPerSlot);
@@ -437,7 +525,11 @@ export class EgressPool {
       totalRequests: s.totalRequests,
       uptimeMs: s.startedAt ? now - s.startedAt : null,
       lastError: s.lastError,
-      failures: s.failures
+      failures: s.failures,
+      probeOk: s.probeOk,
+      probeStatus: s.probeStatus,
+      probeLatencyMs: s.probeLatencyMs,
+      probeAt: s.probeAt
     }));
 
     const stuck: string[] = [];
