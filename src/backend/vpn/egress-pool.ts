@@ -83,6 +83,8 @@ export class EgressPool {
 
   private slots: XraySlot[] = [];
   private size = 0;
+  /** Base loopback port of the current slot set (detects pool_base_port changes). */
+  private basePort = 0;
   private mutex: Promise<any> = Promise.resolve();
   private watchdog: NodeJS.Timeout | null = null;
   private sticky = new Map<number, number>();
@@ -120,7 +122,9 @@ export class EgressPool {
     // a typo cannot fork-bomb the host.
     const maxSize = Math.max(1, Math.min(parseInt(getSetting('pool_max_size', '16'), 10) || 16, 32));
     const configured = Math.max(1, Math.min(size ?? (parseInt(getSetting('pool_size', '2'), 10) || 2), maxSize));
-    if (this.size === configured && this.slots.length === configured) return;
+    const workerIndexForPorts = Math.max(0, parseInt(process.env.WORKER_INDEX || '0', 10) || 0);
+    const nextBase = Math.max(1024, parseInt(getSetting('pool_base_port', '12000'), 10)) + workerIndexForPorts * 100;
+    if (this.size === configured && this.slots.length === configured && this.basePort === nextBase) return;
 
     this.stopWatchdog();
     for (const slot of this.slots) {
@@ -130,8 +134,8 @@ export class EgressPool {
     this.size = configured;
     // Cluster workers must not fight over the same loopback ports: each worker
     // gets a 100-port slice (16 slots x 2 ports fits comfortably).
-    const workerIndex = Math.max(0, parseInt(process.env.WORKER_INDEX || '0', 10) || 0);
-    const base = Math.max(1024, parseInt(getSetting('pool_base_port', '12000'), 10)) + workerIndex * 100;
+    const base = nextBase;
+    this.basePort = base;
     const bin = this.resolveBinary();
     this.slots = Array.from({ length: configured }, (_, i) => {
       const slot = new XraySlot(i, base + i * 2, base + i * 2 + 1, bin, this.dataDir);
