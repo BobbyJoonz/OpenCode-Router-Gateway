@@ -65,7 +65,10 @@ const QUOTA_PATTERNS = [
   /exceeded\s+your\s+current\s+quota/i,
   /billing/i,
   /credit\s+balance/i,
-  /quota\s+exceeded/i
+  /quota\s+exceeded/i,
+  /usage\s+limit/i,
+  /free\s+usage/i,
+  /out\s+of\s+credits/i
 ];
 
 const CONTENT_PATTERNS = [
@@ -105,10 +108,13 @@ export function classifyUpstream(status: number, bodyText = ''): UpstreamErrorIn
   // ---- 429 / quota ------------------------------------------------
   if (status === 429) {
     if (QUOTA_PATTERNS.some((re) => re.test(haystack))) {
-      // Account-level quota: a new IP will not help.
-      return { kind: 'quota', status, retryProvider: false, rotateEgress: false, message, code };
+      // Account-level quota: a new IP will not help, but another provider/account
+      // can still serve this request, so fail over instead of giving up.
+      return { kind: 'quota', status, retryProvider: true, rotateEgress: false, message, code };
     }
-    return { kind: 'rate_limit', status, retryProvider: false, rotateEgress: true, message, code };
+    // Throttled: another provider may serve; if none is left, the caller rotates
+    // the egress IP and retries the same provider.
+    return { kind: 'rate_limit', status, retryProvider: true, rotateEgress: true, message, code };
   }
 
   // ---- auth -------------------------------------------------------
