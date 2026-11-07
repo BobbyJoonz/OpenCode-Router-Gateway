@@ -19,7 +19,8 @@ export interface UpstreamConfig {
 export interface ForwardOptions {
   method: 'GET' | 'POST';
   path: string;
-  httpProxyPort: number;
+  /** Egress proxy port. Omit for a direct connection (loopback upstream). */
+  httpProxyPort?: number;
   body?: any;
   timeoutMs?: number;
   accept?: string;
@@ -103,7 +104,7 @@ export class UpstreamClient {
    * A loopback upstream (e.g. 9Router or a mock on the same host) must NOT be
    * tunnelled: the remote node would try to connect to its own localhost.
    */
-  private static dispatcherForTarget(url: string, httpProxyPort: number): Dispatcher {
+  private static dispatcherForTarget(url: string, httpProxyPort?: number): Dispatcher {
     try {
       const parsed = new URL(url);
       const bypass =
@@ -113,6 +114,7 @@ export class UpstreamClient {
     } catch {
       // fall through to the proxy
     }
+    if (!httpProxyPort || httpProxyPort <= 0) return this.directDispatcher();
     return this.dispatcherFor(httpProxyPort);
   }
 
@@ -183,7 +185,7 @@ export class UpstreamClient {
         method: opts.method,
         headers,
         body: payload,
-        dispatcher: this.dispatcherForTarget(url, opts.httpProxyPort),
+        dispatcher: this.dispatcherForTarget(url, opts.httpProxyPort || 0),
         signal: controller.signal,
         headersTimeout: timeoutMs,
         bodyTimeout: timeoutMs

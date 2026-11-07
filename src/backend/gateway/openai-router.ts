@@ -260,6 +260,35 @@ export function createGatewayRouter(): Router {
       }
     }
 
+    // A settings/env upstream without provider rows (a local 9Router, say) still
+    // has a model list. Fetch it directly so clients can discover what is available.
+    if (upstreamIds.length === 0 && config.baseUrl) {
+      try {
+        const direct = await UpstreamClient.forward({ method: 'GET', path: '/models', timeoutMs: 15000 });
+        if (direct.statusCode >= 200 && direct.statusCode < 300) {
+          const text = await UpstreamClient.readAll(direct.body);
+          direct.cleanup();
+          try {
+            const parsed = JSON.parse(text);
+            for (const item of parsed?.data || []) {
+              if (item?.id && !upstreamIds.includes(item.id)) upstreamIds.push(item.id);
+            }
+          } catch {
+            /* not JSON */
+          }
+        } else {
+          try {
+            await UpstreamClient.readAll(direct.body);
+          } catch {
+            /* ignore */
+          }
+          direct.cleanup();
+        }
+      } catch {
+        /* upstream unreachable â€” keep the alias list */
+      }
+    }
+
     const aliases = ModelRouter.aliases();
     const fallback = config.model || 'gpt-4o-mini';
 
@@ -680,6 +709,7 @@ async function pipeStream(
 
   const scanner = makeUsageScanner();
   let clientClosed = false;
+  let sawDone = false;
 
   req.on('close', () => {
     clientClosed = true;
@@ -695,6 +725,7 @@ async function pipeStream(
       if (clientClosed || res.writableEnded) break;
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       scanner.push(buf);
+      if (!sawDone && buf.includes('[DONE]')) sawDone = true;
       if (!res.write(buf)) {
         // Race drain against close: after a client disconnect 'drain' never
         // fires, and waiting on it forever would leak the upstream body.
@@ -707,6 +738,15 @@ async function pipeStream(
           res.once('drain', done);
           res.once('close', done);
         });
+      }
+    }
+    // Some upstreams (9Router among them) never send the [DONE] sentinel. OpenAI
+    // SDKs wait for it, so synthesise it rather than leaving the client hanging.
+    if (!sawDone && !clientClosed && !res.writableEnded) {
+      try {
+        res.write('data: [DONE]\n\n');
+      } catch {
+        /* ignore */
       }
     }
     if (!clientClosed && !res.writableEnded) res.end();
