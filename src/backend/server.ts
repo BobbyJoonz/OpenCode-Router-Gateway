@@ -691,6 +691,62 @@ app.post('/api/egress/failover/:slot', async (req: Request, res: Response) => {
   res.json({ success: ok, status: egressPool.status() });
 });
 
+app.get('/api/accounts/opencode', async (req: Request, res: Response) => {
+  try {
+    const accounts = ProviderRegistry.list().filter((p: any) => String(p.name || '').startsWith('oc-acct-'));
+    const results = await Promise.all(
+      accounts.map(async (p: any) => {
+        const key = ProviderRegistry.resolveApiKey(p);
+        const model = p.model || 'deepseek-v4.1-flash-free';
+        const startedAt = Date.now();
+        try {
+          const response = await fetch(`${String(p.base_url).replace(/\/+$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+            body: JSON.stringify({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 4 }),
+            signal: AbortSignal.timeout(15000)
+          });
+          const retryAfter = response.headers.get('retry-after');
+          const body = await response.text();
+          let kind = 'ok';
+          if (response.status === 429) kind = 'quota';
+          else if (response.status === 403) kind = 'policy';
+          else if (response.status === 401) kind = 'auth';
+          else if (response.status >= 500) kind = 'upstream';
+          return {
+            name: p.name,
+            providerId: p.id,
+            model,
+            status: response.status,
+            kind,
+            retryAfter: retryAfter ? Number(retryAfter) : null,
+            latencyMs: Date.now() - startedAt,
+            body: body.slice(0, 120)
+          };
+        } catch (err: any) {
+          return {
+            name: p.name,
+            providerId: p.id,
+            model,
+            status: 0,
+            kind: 'network',
+            retryAfter: null,
+            latencyMs: Date.now() - startedAt,
+            body: String(err?.message || err).slice(0, 120)
+          };
+        }
+      })
+    );
+    res.json({
+      accounts: results,
+      usable: results.filter((r) => r.kind === 'ok').length,
+      total: results.length
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'account probe failed' });
+  }
+});
+
 app.get('/api/egress/premium', async (req: Request, res: Response) => {
   try {
     const http = await premiumProxy.probePremiumProxy('http');
