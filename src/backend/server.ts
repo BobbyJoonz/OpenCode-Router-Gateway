@@ -39,6 +39,7 @@ import {
   sanitizeSubscriptionUrl
 } from './security/api-guard';
 import { FRONTEND_DIST } from './paths';
+import * as premiumProxy from './egress/premium-proxy';
 
 export const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -688,6 +689,19 @@ app.post('/api/egress/failover/:slot', async (req: Request, res: Response) => {
   if (!Number.isInteger(slot)) return res.status(400).json({ error: 'invalid slot index' });
   const ok = await egressPool.failoverSlot(slot, 'manual');
   res.json({ success: ok, status: egressPool.status() });
+});
+
+app.get('/api/egress/premium', async (req: Request, res: Response) => {
+  try {
+    const http = await premiumProxy.probePremiumProxy('http');
+    const socks = await premiumProxy.probePremiumProxy('socks5');
+    res.json({
+      proxies: [http, socks].map((p) => ({ ...p, endpoint: premiumProxy.redactProxyUrl(premiumProxy.premiumProxyUrl(p.kind)) })),
+      secretsExposed: false
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'premium probe failed' });
+  }
 });
 
 app.post('/api/egress/probe', async (req: Request, res: Response) => {

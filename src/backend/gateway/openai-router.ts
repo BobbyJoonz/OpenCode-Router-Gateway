@@ -609,7 +609,11 @@ export function createGatewayRouter(): Router {
             res.setHeader('x-provider', provider.name);
             res.setHeader('x-provider-id', String(provider.id));
           }
-          res.setHeader('x-egress-node', String(nodeId ?? ''));
+          const egressLabel =
+            provider && String((provider as any).egress_mode || '').startsWith('premium')
+              ? String((provider as any).egress_mode)
+              : String(nodeId ?? '');
+          res.setHeader('x-egress-node', egressLabel);
           if (wantsStream) {
             await pipeStream(req, res, forwarded, key, body, startedAt, meta, extraUsage, trace);
           } else {

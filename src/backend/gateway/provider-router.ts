@@ -5,6 +5,7 @@ import { TpmTracker } from '../providers/tpm-tracker';
 import { Readable } from 'stream';
 import { ForwardOptions, ForwardResult, UpstreamClient } from './upstream-client';
 import { classifyUpstream, UpstreamErrorInfo } from './upstream-errors';
+import * as premiumProxy from '../egress/premium-proxy';
 
 export interface ProviderForwardResult {
   forwarded: ForwardResult;
@@ -55,6 +56,7 @@ export class ProviderRouter {
           cost_per_1m_in: 0,
           cost_per_1m_out: 0,
           rpm_limit: 0,
+          egress_mode: 'pool',
           tpm_limit: 0,
           daily_usd_cap: 0,
           enabled: 1,
@@ -143,11 +145,16 @@ export class ProviderRouter {
           : opts;
 
       try {
+        // Egress path for this provider: the shared Xray pool by default, or the
+        // premium rotating proxy when the provider asks for it.
+        const egressMode = premiumProxy.egressModeOf(provider as any);
+        const proxyUrl = await premiumProxy.proxyUrlForEgressMode(egressMode);
         const forwarded = await UpstreamClient.forward({
           ...forwardOpts,
           baseUrl: provider.base_url,
           apiKey: ProviderRegistry.resolveApiKey(provider),
-          kind: provider.kind
+          kind: provider.kind,
+          ...(proxyUrl ? { proxyUrl } : {})
         });
 
         // ---------------------------------------------------------- success

@@ -170,6 +170,7 @@ export function runMigrations(db: Database.Database): void {
   addColumnTo('api_keys', 'spend_cap_usd_monthly', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'egress_policy', "TEXT DEFAULT ''");
   addColumnTo('providers', 'tpm_limit', 'INTEGER DEFAULT 0');
+  addColumnTo('providers', 'egress_mode', "TEXT DEFAULT 'pool'");
 
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_tcp ON configs(tcp_alive)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_configs_health ON configs(health_score)`);

@@ -8,6 +8,7 @@ import {
   anthropicSseToOpenAi,
   toAnthropicRequest
 } from '../providers/anthropic-adapter';
+import * as premium_1 from '../egress/premium-proxy';
 
 export interface UpstreamConfig {
   baseUrl: string;
@@ -30,6 +31,8 @@ export interface ForwardOptions {
   apiKey?: string;
   /** Provider flavour. `anthropic` triggers request/response translation. */
   kind?: string;
+  /** Full proxy URL (with credentials) to use instead of the egress slot. */
+  proxyUrl?: string;
 }
 
 export interface ForwardResult {
@@ -185,7 +188,9 @@ export class UpstreamClient {
         method: opts.method,
         headers,
         body: payload,
-        dispatcher: this.dispatcherForTarget(url, opts.httpProxyPort || 0),
+        dispatcher: opts.proxyUrl
+          ? premium_1.dispatcherForProxyUrl(opts.proxyUrl)
+          : this.dispatcherForTarget(url, opts.httpProxyPort || 0),
         signal: controller.signal,
         headersTimeout: timeoutMs,
         bodyTimeout: timeoutMs
