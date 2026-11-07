@@ -207,6 +207,11 @@ export class KeyManager {
     providerId?: number | null;
     costUsd?: number;
     error?: string | null;
+    requestedModel?: string | null;
+    resolvedModel?: string | null;
+    requestId?: string | null;
+    attempts?: number;
+    fallbackUsed?: boolean;
   }): void {
     try {
       // Feed Prometheus counters from the single accounting choke point, so
@@ -219,8 +224,9 @@ export class KeyManager {
       db.prepare(
         `INSERT INTO usage_log
            (key_id, model, prompt_tokens, completion_tokens, total_tokens,
-            status_code, latency_ms, upstream, egress_node_id, provider_id, cost_usd, error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            status_code, latency_ms, upstream, egress_node_id, provider_id, cost_usd, error,
+            requested_model, resolved_model, request_id, attempts, fallback_used)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         params.keyId,
         params.model,
@@ -233,7 +239,12 @@ export class KeyManager {
         params.egressNodeId,
         params.providerId ?? null,
         params.costUsd ?? 0,
-        params.error || null
+        params.error || null,
+        params.requestedModel ?? null,
+        params.resolvedModel ?? null,
+        params.requestId ?? null,
+        params.attempts ?? 1,
+        params.fallbackUsed ? 1 : 0
       );
 
       db.prepare(

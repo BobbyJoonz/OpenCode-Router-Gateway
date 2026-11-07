@@ -158,6 +158,13 @@ export function runMigrations(db: Database.Database): void {
     if (!existing.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${ddl}`);
   };
   addColumnTo('usage_log', 'provider_id', 'INTEGER');
+  // Request-level traceability: requested vs resolved model, request id, attempts
+  // and whether a fallback provider served the request.
+  addColumnTo('usage_log', 'requested_model', 'TEXT');
+  addColumnTo('usage_log', 'resolved_model', 'TEXT');
+  addColumnTo('usage_log', 'request_id', 'TEXT');
+  addColumnTo('usage_log', 'attempts', 'INTEGER DEFAULT 1');
+  addColumnTo('usage_log', 'fallback_used', 'INTEGER DEFAULT 0');
   addColumnTo('usage_log', 'cost_usd', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'spend_cap_usd_daily', 'REAL DEFAULT 0');
   addColumnTo('api_keys', 'spend_cap_usd_monthly', 'REAL DEFAULT 0');

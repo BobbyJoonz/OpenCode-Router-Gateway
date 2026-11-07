@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Router, Request, Response, NextFunction } from 'express';
 import { db, getSetting } from '../db/database';
 import { KeyManager, ApiKeyRow } from './key-manager';
@@ -339,6 +340,11 @@ export function createGatewayRouter(): Router {
     const key = req.apiKey!;
     const body = req.body;
 
+    // Every request carries a trace id so a client report can be matched to the
+    // exact usage row, provider, egress slot and attempt count.
+    const requestId = randomUUID();
+    res.setHeader('x-request-id', requestId);
+
     // Admission control: refuse fast with Retry-After instead of accepting work
     // the process cannot relay (which shows up as timeouts and runaway memory).
     if (activeRequests >= maxConcurrentRequests()) {
@@ -533,6 +539,7 @@ export function createGatewayRouter(): Router {
       let forwarded;
       let provider: ProviderRow | null = null;
       let routedError: any = undefined;
+      let providerAttempts = 1;
       try {
         const routed = await ProviderRouter.forward({
           method: 'POST',
@@ -544,6 +551,7 @@ export function createGatewayRouter(): Router {
         forwarded = routed.forwarded;
         provider = routed.provider;
         routedError = routed.error;
+        providerAttempts = (routed as any).attempts ?? 1;
       } catch (err: any) {
         releaseOnce();
         const classification = classifyNetwork(err?.code);
@@ -583,10 +591,29 @@ export function createGatewayRouter(): Router {
         if (classification.class === 'ok') {
           if (nodeId) FreshnessTracker.recordSuccess(nodeId);
           const meta = { nodeId, provider };
+          // Source identity: what was asked for, what actually served it, and how
+          // many attempts it took. A model substitution is never silent.
+          const resolvedModel = provider?.model || (body?.model ? String(body.model) : null);
+          const requestedModel = body?.model ? String(body.model) : null;
+          const fallbackUsed =
+            attempt > 1 ||
+            !!(selection?.providerIds?.length && provider && selection.providerIds[0] !== provider.id);
+          // Provider attempts (e.g. OpenCode 429 then a fallback) rather than
+          // egress-slot attempts. providerAttempts comes from the forward result.
+          const trace = { requestId, requestedModel, resolvedModel, attempts: providerAttempts, fallbackUsed };
+          res.setHeader('x-model-requested', requestedModel || '');
+          res.setHeader('x-model-resolved', resolvedModel || '');
+          res.setHeader('x-attempts', String(providerAttempts));
+          res.setHeader('x-fallback-used', fallbackUsed ? '1' : '0');
+          if (provider) {
+            res.setHeader('x-provider', provider.name);
+            res.setHeader('x-provider-id', String(provider.id));
+          }
+          res.setHeader('x-egress-node', String(nodeId ?? ''));
           if (wantsStream) {
-            await pipeStream(req, res, forwarded, key, body, startedAt, meta, extraUsage);
+            await pipeStream(req, res, forwarded, key, body, startedAt, meta, extraUsage, trace);
           } else {
-            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, meta, extraUsage);
+            await relayJson(res, forwarded, forwarded.statusCode, key, body, startedAt, meta, extraUsage, trace);
           }
           return;
         }
@@ -649,7 +676,14 @@ async function relayJson(
   body: any,
   startedAt: number,
   meta: { nodeId: number | null; provider: ProviderRow | null },
-  extraUsage: { prompt: number; completion: number; total: number } = { prompt: 0, completion: 0, total: 0 }
+  extraUsage: { prompt: number; completion: number; total: number } = { prompt: 0, completion: 0, total: 0 },
+  trace: {
+    requestId?: string | null;
+    requestedModel?: string | null;
+    resolvedModel?: string | null;
+    attempts?: number;
+    fallbackUsed?: boolean;
+  } = {}
 ): Promise<void> {
   let text = '';
   try {
@@ -680,7 +714,12 @@ async function relayJson(
     upstream: meta.provider?.base_url || UpstreamClient.resolveConfig().baseUrl,
     egressNodeId: meta.nodeId,
     providerId: meta.provider?.id ?? null,
-    costUsd: costOf(modelName, promptTokens, completionTokens)
+    costUsd: costOf(modelName, promptTokens, completionTokens),
+    requestId: trace.requestId ?? null,
+    requestedModel: trace.requestedModel ?? null,
+    resolvedModel: trace.resolvedModel ?? modelName,
+    attempts: trace.attempts ?? 1,
+    fallbackUsed: trace.fallbackUsed ?? false
   });
 
   if (parsed === null) {
@@ -698,7 +737,14 @@ async function pipeStream(
   body: any,
   startedAt: number,
   meta: { nodeId: number | null; provider: ProviderRow | null },
-  extraUsage: { prompt: number; completion: number; total: number } = { prompt: 0, completion: 0, total: 0 }
+  extraUsage: { prompt: number; completion: number; total: number } = { prompt: 0, completion: 0, total: 0 },
+  trace: {
+    requestId?: string | null;
+    requestedModel?: string | null;
+    resolvedModel?: string | null;
+    attempts?: number;
+    fallbackUsed?: boolean;
+  } = {}
 ): Promise<void> {
   res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -777,6 +823,11 @@ async function pipeStream(
       egressNodeId: meta.nodeId,
       providerId: meta.provider?.id ?? null,
       costUsd: costOf(modelName, promptTokens, completionTokens),
+      requestId: trace.requestId ?? null,
+      requestedModel: trace.requestedModel ?? null,
+      resolvedModel: trace.resolvedModel ?? modelName,
+      attempts: trace.attempts ?? 1,
+      fallbackUsed: trace.fallbackUsed ?? false,
       error: clientClosed ? 'client_closed' : null
     });
   }
